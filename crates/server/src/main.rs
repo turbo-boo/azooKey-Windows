@@ -204,11 +204,7 @@ async fn request_magic_conversion(text: &str) -> Result<Vec<String>, String> {
         return Err("変換対象が空です".to_string());
     }
 
-    let endpoint = reqwest::Url::parse(&magic.endpoint)
-        .map_err(|error| format!("APIエンドポイントが不正です: {error}"))?;
-    if endpoint.scheme() != "https" && endpoint.scheme() != "http" {
-        return Err("APIエンドポイントはHTTPまたはHTTPSで指定してください".to_string());
-    }
+    let endpoint = validate_magic_endpoint(&magic.endpoint)?;
     if magic.model.trim().is_empty() {
         return Err("APIモデル名が空です".to_string());
     }

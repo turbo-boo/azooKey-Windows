@@ -5,9 +5,6 @@ on:
   pull_request:
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
   validate:
     runs-on: windows-latest
@@ -28,7 +25,7 @@ jobs:
     - name: Install node dependencies
       run: |
         cd frontend
-        npm install
+        npm ci
 
     - name: Frontend typecheck and build
       run: |
@@ -36,40 +33,16 @@ jobs:
         npm run build
 
     - name: Shared unit tests
-      run: cargo test -p shared
+      run: cargo test --locked -p shared
 
     - name: Server pure unit tests
-      run: cargo test -p azookey-server --lib
+      run: cargo test --locked -p azookey-server --lib
 
     - name: UI theme unit tests
-      run: cargo test -p ui
+      run: cargo test --locked -p ui
 
     - name: Rust workspace check
-      run: cargo check --workspace --all-targets
-
-    - name: Upload resolved lockfiles
-      uses: actions/upload-artifact@v4
-      with:
-        name: resolved-lockfiles
-        path: |
-          Cargo.lock
-          frontend/package-lock.json
-        if-no-files-found: error
-
-    - name: Commit resolved lockfiles
-      if: github.event_name == 'push' && github.ref == 'refs/heads/feature/remaining-features'
-      shell: pwsh
-      run: |
-        git add Cargo.lock frontend/package-lock.json
-        git diff --cached --quiet
-        if ($LASTEXITCODE -eq 0) {
-          Write-Host "Lockfiles are already current"
-          exit 0
-        }
-        git config user.name "github-actions[bot]"
-        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        git commit -m "build: refresh dependency lockfiles"
-        git push origin HEAD:feature/remaining-features
+      run: cargo check --locked --workspace --all-targets
 
   build:
     needs: validate
@@ -138,10 +111,13 @@ jobs:
     - name: Install node dependencies
       run: |
         cd frontend
-        npm install
+        npm ci
 
     - name: Swift unit tests
       run: swift test --package-path server-swift
+
+    - name: Verify Cargo lockfile
+      run: cargo metadata --locked --no-deps > $null
 
     - name: Build
       run: cargo make build --release

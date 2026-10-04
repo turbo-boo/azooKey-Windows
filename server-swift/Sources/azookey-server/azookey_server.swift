@@ -98,21 +98,21 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
         
         do {
             let data = try Data(contentsOf: settingsPath)
-            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let zenzaiDict = json["zenzai"] as? [String: Any] {
-                
-                if let enableValue = zenzaiDict["enable"] as? Bool {
-                    config["enable"] = enableValue
-                }
-                
-                if let profileValue = zenzaiDict["profile"] as? String {
-                    config["profile"] = profileValue
-                }
-            }
+            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                if let zenzaiDict = json["zenzai"] as? [String: Any] {
+                    if let enableValue = zenzaiDict["enable"] as? Bool {
+                        config["enable"] = enableValue
+                    }
 
-            if let learningDict = json["learning"] as? [String: Any],
-               let mode = learningDict["mode"] as? String {
-                config["learningMode"] = mode
+                    if let profileValue = zenzaiDict["profile"] as? String {
+                        config["profile"] = profileValue
+                    }
+                }
+
+                if let learningDict = json["learning"] as? [String: Any],
+                   let mode = learningDict["mode"] as? String {
+                    config["learningMode"] = mode
+                }
             }
         } catch {
             print("Failed to read settings: \(error)")

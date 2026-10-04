@@ -23,9 +23,24 @@ pub struct ZenzaiConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct LearningConfig {
+    pub mode: String,
+}
+
+impl Default for LearningConfig {
+    fn default() -> Self {
+        Self {
+            mode: "inputAndOutput".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AppConfig {
     pub version: String,
     pub zenzai: ZenzaiConfig,
+    #[serde(default)]
+    pub learning: LearningConfig,
 }
 
 impl Default for AppConfig {
@@ -37,6 +52,7 @@ impl Default for AppConfig {
                 profile: "".to_string(),
                 backend: "cpu".to_string(),
             },
+            learning: LearningConfig::default(),
         }
     }
 }

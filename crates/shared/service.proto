@@ -6,6 +6,7 @@ message Suggestion {
   string text = 1;    // The main suggestion text.
   string subtext = 2; // Additional information or subtext for the suggestion.
   int32 corresponding_count = 3;
+  int32 candidate_id = 4; // Stable index into the converter's current candidate list.
 }
 
 // ComposingText represents the text and its associated suggestions.
@@ -66,6 +67,14 @@ message SetContextResponse {}
 message UpdateConfigRequest {}
 message UpdateConfigResponse {}
 
+message CommitCandidateRequest {
+  int32 candidate_id = 1;
+}
+message CommitCandidateResponse {}
+
+message FlushLearningRequest {}
+message FlushLearningResponse {}
+
 
 // Service definition for text editing operations.
 service AzookeyService {
@@ -76,4 +85,6 @@ service AzookeyService {
   rpc ClearText (ClearTextRequest) returns (ClearTextResponse);
   rpc SetContext (SetContextRequest) returns (SetContextResponse);
   rpc UpdateConfig (UpdateConfigRequest) returns (UpdateConfigResponse);
+  rpc CommitCandidate (CommitCandidateRequest) returns (CommitCandidateResponse);
+  rpc FlushLearning (FlushLearningRequest) returns (FlushLearningResponse);
 }

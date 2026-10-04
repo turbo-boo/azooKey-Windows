@@ -11,7 +11,7 @@ use shared::proto::{
     MoveCursorRequest, MoveCursorResponse, PredictionSuggestion, RemoveTextRequest,
     RemoveTextResponse, ShrinkTextRequest, ShrinkTextResponse, Suggestion,
 };
-use shared::{parse_magic_candidates, AppConfig};
+use shared::{parse_magic_candidates, validate_magic_endpoint_parts, AppConfig};
 
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::time::Duration;
@@ -204,7 +204,9 @@ async fn request_magic_conversion(text: &str) -> Result<Vec<String>, String> {
         return Err("変換対象が空です".to_string());
     }
 
-    let endpoint = validate_magic_endpoint(&magic.endpoint)?;
+    let endpoint = reqwest::Url::parse(&magic.endpoint)
+        .map_err(|error| format!("APIエンドポイントが不正です: {error}"))?;
+    validate_magic_endpoint_parts(endpoint.scheme(), endpoint.host_str())?;
     if magic.model.trim().is_empty() {
         return Err("APIモデル名が空です".to_string());
     }

@@ -375,6 +375,21 @@ pub fn validate_tuner_directory(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+pub fn validate_magic_endpoint_parts(scheme: &str, host: Option<&str>) -> Result<(), String> {
+    match scheme {
+        "https" => Ok(()),
+        "http" => {
+            let host = host.unwrap_or_default();
+            if host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1" {
+                Ok(())
+            } else {
+                Err("HTTPはlocalhostのAPIにだけ使用できます。外部APIにはHTTPSを使用してください".to_string())
+            }
+        }
+        _ => Err("APIエンドポイントはHTTPまたはHTTPSで指定してください".to_string()),
+    }
+}
+
 pub fn parse_magic_candidates(value: &serde_json::Value) -> Result<Vec<String>, String> {
     let choices = value
         .get("choices")
@@ -422,6 +437,16 @@ pub fn parse_magic_candidates(value: &serde_json::Value) -> Result<Vec<String>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn magic_endpoint_allows_https_and_local_http_only() {
+        assert!(validate_magic_endpoint_parts("https", Some("example.com")).is_ok());
+        assert!(validate_magic_endpoint_parts("http", Some("localhost")).is_ok());
+        assert!(validate_magic_endpoint_parts("http", Some("127.0.0.1")).is_ok());
+        assert!(validate_magic_endpoint_parts("http", Some("::1")).is_ok());
+        assert!(validate_magic_endpoint_parts("http", Some("example.com")).is_err());
+        assert!(validate_magic_endpoint_parts("ftp", Some("localhost")).is_err());
+    }
 
     #[test]
     fn magic_candidates_parse_json_dedupe_and_limit() {

@@ -27,6 +27,7 @@ pub enum Navigation {
 
 #[derive(Debug)]
 pub enum Function {
+    Five,
     Six,
     Seven,
     Eight,
@@ -65,6 +66,7 @@ impl TryFrom<usize> for UserAction {
                 }
             }
 
+            0x74 => UserAction::Function(Function::Five), // VK_F5
             0x75 => UserAction::Function(Function::Six), // VK_F6
             0x76 => UserAction::Function(Function::Seven), // VK_F7
             0x77 => UserAction::Function(Function::Eight), // VK_F8

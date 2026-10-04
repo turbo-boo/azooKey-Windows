@@ -197,6 +197,16 @@ impl IPCService {
     }
 
     #[tracing::instrument]
+    pub fn magic_convert(&mut self, text: String) -> anyhow::Result<Vec<String>> {
+        let request = tonic::Request::new(shared::proto::MagicConvertRequest { text });
+        let response = self
+            .runtime
+            .clone()
+            .block_on(self.azookey_client.magic_convert(request))?;
+        Ok(response.into_inner().candidates)
+    }
+
+    #[tracing::instrument]
     pub fn shrink_text(&mut self, offset: i32) -> anyhow::Result<Candidates> {
         let request = tonic::Request::new(shared::proto::ShrinkTextRequest { offset });
         let response = self

@@ -190,6 +190,10 @@ impl TextServiceFactory {
                     vec![ClientAction::SetSelection(SetSelectionType::Down)],
                 ),
                 UserAction::Function(key) => match key {
+                    Function::Five => (
+                        CompositionState::Previewing,
+                        vec![ClientAction::MagicConvert],
+                    ),
                     Function::Six => (
                         CompositionState::Previewing,
                         vec![ClientAction::SetTextWithType(SetTextType::Hiragana)],
@@ -290,6 +294,10 @@ impl TextServiceFactory {
                     vec![ClientAction::SetSelection(SetSelectionType::Down)],
                 ),
                 UserAction::Function(key) => match key {
+                    Function::Five => (
+                        CompositionState::Previewing,
+                        vec![ClientAction::MagicConvert],
+                    ),
                     Function::Six => (
                         CompositionState::Previewing,
                         vec![ClientAction::SetTextWithType(SetTextType::Hiragana)],
@@ -424,6 +432,32 @@ impl TextServiceFactory {
                         }
                     }
                     should_learn_candidate = false;
+                }
+                ClientAction::MagicConvert => {
+                    let source = if preview.is_empty() {
+                        raw_hiragana.clone()
+                    } else {
+                        preview.clone()
+                    };
+                    let converted = ipc_service.magic_convert(source)?;
+                    if !converted.is_empty() {
+                        let count = raw_hiragana.chars().count() as i32;
+                        candidates = Candidates {
+                            texts: converted.clone(),
+                            sub_texts: vec![String::new(); converted.len()],
+                            hiragana: raw_hiragana.clone(),
+                            corresponding_count: vec![count; converted.len()],
+                            candidate_ids: vec![-1; converted.len()],
+                        };
+                        selection_index = 0;
+                        corresponding_count = count;
+                        preview = converted[0].clone();
+                        suffix.clear();
+                        should_learn_candidate = false;
+                        self.set_text(&preview, "")?;
+                        ipc_service.set_candidates(candidates.texts.clone())?;
+                        ipc_service.set_selection(0)?;
+                    }
                 }
                 ClientAction::RemoveText => {
                     candidates = ipc_service.remove_text()?;

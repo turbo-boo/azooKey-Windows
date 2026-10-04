@@ -9,6 +9,7 @@ pub enum ClientAction {
     RemoveText,
     ShrinkText(String),
     CommitCandidate,
+    MagicConvert,
 
     SetTextWithType(SetTextType),
 

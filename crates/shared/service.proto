@@ -78,6 +78,14 @@ message FlushLearningResponse {}
 message ResetLearningRequest {}
 message ResetLearningResponse {}
 
+message MagicConvertRequest {
+  string text = 1;
+}
+
+message MagicConvertResponse {
+  repeated string candidates = 1;
+}
+
 
 // Service definition for text editing operations.
 service AzookeyService {
@@ -91,4 +99,5 @@ service AzookeyService {
   rpc CommitCandidate (CommitCandidateRequest) returns (CommitCandidateResponse);
   rpc FlushLearning (FlushLearningRequest) returns (FlushLearningResponse);
   rpc ResetLearning (ResetLearningRequest) returns (ResetLearningResponse);
+  rpc MagicConvert (MagicConvertRequest) returns (MagicConvertResponse);
 }

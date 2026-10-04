@@ -5,11 +5,13 @@ use tonic_reflection::server::Builder as ReflectionBuilder;
 use shared::proto::azookey_service_server::{AzookeyService, AzookeyServiceServer};
 use shared::proto::{
     AppendTextRequest, AppendTextResponse, ClearTextRequest, ClearTextResponse, ComposingText,
-    MoveCursorRequest, MoveCursorResponse, RemoveTextRequest, RemoveTextResponse,
-    ShrinkTextRequest, ShrinkTextResponse, Suggestion,
+    MagicConvertRequest, MagicConvertResponse, MoveCursorRequest, MoveCursorResponse,
+    RemoveTextRequest, RemoveTextResponse, ShrinkTextRequest, ShrinkTextResponse, Suggestion,
 };
+use shared::AppConfig;
 
 use std::ffi::{c_char, c_int, CStr, CString};
+use std::time::Duration;
 
 const USE_ZENZAI: bool = true;
 
@@ -156,6 +158,126 @@ fn shrink_text(offset: i8) -> RawComposingText {
     }
 }
 
+fn parse_magic_candidates(value: &serde_json::Value) -> Result<Vec<String>, String> {
+    let choices = value
+        .get("choices")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "APIレスポンスにchoicesがありません".to_string())?;
+
+    let mut candidates = Vec::new();
+    for choice in choices {
+        let Some(content) = choice
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(|value| value.as_str())
+        else {
+            continue;
+        };
+
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) {
+            if let Some(predictions) = parsed.get("predictions").and_then(|value| value.as_array()) {
+                for prediction in predictions {
+                    if let Some(text) = prediction.as_str() {
+                        let text = text.trim();
+                        if !text.is_empty() && !candidates.iter().any(|item| item == text) {
+                            candidates.push(text.to_string());
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+
+        let text = content.trim();
+        if !text.is_empty() && !candidates.iter().any(|item| item == text) {
+            candidates.push(text.to_string());
+        }
+    }
+
+    candidates.truncate(5);
+    if candidates.is_empty() {
+        Err("APIレスポンスから候補を取得できませんでした".to_string())
+    } else {
+        Ok(candidates)
+    }
+}
+
+async fn request_magic_conversion(text: &str) -> Result<Vec<String>, String> {
+    let config = AppConfig::read();
+    let magic = config.magic_conversion;
+    if !magic.enabled {
+        return Err("いい感じ変換が無効です".to_string());
+    }
+    if text.trim().is_empty() {
+        return Err("変換対象が空です".to_string());
+    }
+
+    let endpoint = reqwest::Url::parse(&magic.endpoint)
+        .map_err(|error| format!("APIエンドポイントが不正です: {error}"))?;
+    if endpoint.scheme() != "https" && endpoint.scheme() != "http" {
+        return Err("APIエンドポイントはHTTPまたはHTTPSで指定してください".to_string());
+    }
+    if magic.model.trim().is_empty() {
+        return Err("APIモデル名が空です".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(magic.timeout_seconds.clamp(1, 60)))
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    let body = serde_json::json!({
+        "model": magic.model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "日本語入力支援です。入力文をユーザーの指示に従って自然に書き換え、3〜5個の候補だけを返してください。"
+            },
+            {
+                "role": "user",
+                "content": format!("指示: {}\n入力: {}", magic.instruction, text)
+            }
+        ],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "azookey_magic_conversion",
+                "strict": true,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "predictions": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "minItems": 1,
+                            "maxItems": 5
+                        }
+                    },
+                    "required": ["predictions"],
+                    "additionalProperties": false
+                }
+            }
+        }
+    });
+
+    let mut request = client.post(endpoint).json(&body);
+    if !magic.api_key.trim().is_empty() {
+        request = request.bearer_auth(magic.api_key.trim());
+    }
+
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    let status = response.status();
+    let response_text = response.text().await.map_err(|error| error.to_string())?;
+    if !status.is_success() {
+        let compact = response_text.chars().take(500).collect::<String>();
+        return Err(format!("APIエラー {}: {}", status.as_u16(), compact));
+    }
+
+    let value: serde_json::Value = serde_json::from_str(&response_text)
+        .map_err(|error| format!("APIレスポンスのJSON解析に失敗しました: {error}"))?;
+    parse_magic_candidates(&value)
+}
+
 #[derive(Debug, Default)]
 pub struct MyAzookeyService;
 
@@ -276,6 +398,17 @@ impl AzookeyService for MyAzookeyService {
     ) -> Result<Response<shared::proto::ResetLearningResponse>, Status> {
         unsafe { ResetLearning() };
         Ok(Response::new(shared::proto::ResetLearningResponse {}))
+    }
+
+    async fn magic_convert(
+        &self,
+        request: Request<MagicConvertRequest>,
+    ) -> Result<Response<MagicConvertResponse>, Status> {
+        let text = request.into_inner().text;
+        let candidates = request_magic_conversion(&text)
+            .await
+            .map_err(Status::failed_precondition)?;
+        Ok(Response::new(MagicConvertResponse { candidates }))
     }
 }
 

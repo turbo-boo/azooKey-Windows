@@ -75,6 +75,42 @@ struct SComposingText {
     var cursor: Int
 }
 
+func normalizeDictionaryReading(_ input: String) -> String {
+    let result = input.utf16.map { scalar -> UInt16 in
+        if 0x3041 <= scalar && scalar <= 0x3096 {
+            return scalar + 96
+        }
+        return scalar
+    }
+    return String(utf16CodeUnits: result, count: result.count)
+}
+
+@MainActor func applyUserDictionary(_ json: [String: Any]) {
+    let rawEntries = (json["dictionary"] as? [String: Any])?["entries"] as? [[String: Any]] ?? []
+    let entries: [DicdataElement] = rawEntries.compactMap { item in
+        guard let rawReading = item["reading"] as? String,
+              let rawWord = item["word"] as? String else {
+            return nil
+        }
+
+        let reading = rawReading.trimmingCharacters(in: .whitespacesAndNewlines)
+        let word = rawWord.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !reading.isEmpty, !word.isEmpty else {
+            return nil
+        }
+
+        return DicdataElement(
+            word: word,
+            ruby: normalizeDictionaryReading(reading),
+            cid: CIDData.固有名詞.cid,
+            mid: MIDData.一般.mid,
+            value: -10
+        )
+    }
+
+    converter.sendToDicdataStore(.importDynamicUserDict(entries))
+}
+
 func constructCandidateString(candidate: Candidate, hiragana: String) -> String {
     var remainingHiragana = hiragana
     var result = ""
@@ -113,6 +149,8 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
                    let mode = learningDict["mode"] as? String {
                     config["learningMode"] = mode
                 }
+
+                applyUserDictionary(json)
             }
         } catch {
             print("Failed to read settings: \(error)")

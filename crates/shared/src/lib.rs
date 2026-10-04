@@ -369,9 +369,84 @@ pub fn validate_tuner_directory(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+pub fn parse_magic_candidates(value: &serde_json::Value) -> Result<Vec<String>, String> {
+    let choices = value
+        .get("choices")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "APIレスポンスにchoicesがありません".to_string())?;
+
+    let mut candidates = Vec::new();
+    for choice in choices {
+        let Some(content) = choice
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(|value| value.as_str())
+        else {
+            continue;
+        };
+
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) {
+            if let Some(predictions) = parsed.get("predictions").and_then(|value| value.as_array()) {
+                for prediction in predictions {
+                    if let Some(text) = prediction.as_str() {
+                        let text = text.trim();
+                        if !text.is_empty() && !candidates.iter().any(|item| item == text) {
+                            candidates.push(text.to_string());
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+
+        let text = content.trim();
+        if !text.is_empty() && !candidates.iter().any(|item| item == text) {
+            candidates.push(text.to_string());
+        }
+    }
+
+    candidates.truncate(5);
+    if candidates.is_empty() {
+        Err("APIレスポンスから候補を取得できませんでした".to_string())
+    } else {
+        Ok(candidates)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn magic_candidates_parse_json_dedupe_and_limit() {
+        let value = serde_json::json!({
+            "choices": [
+                {"message": {"content": "{\"predictions\":[\"候補A\",\"候補B\",\"候補A\",\"3\",\"4\",\"5\",\"6\"]}"}}
+            ]
+        });
+        assert_eq!(
+            parse_magic_candidates(&value).unwrap(),
+            vec![
+                "候補A".to_string(),
+                "候補B".to_string(),
+                "3".to_string(),
+                "4".to_string(),
+                "5".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn magic_candidates_accept_plain_text_and_reject_missing_choices() {
+        let value = serde_json::json!({
+            "choices": [{"message": {"content": "自然な候補"}}]
+        });
+        assert_eq!(
+            parse_magic_candidates(&value).unwrap(),
+            vec!["自然な候補".to_string()]
+        );
+        assert!(parse_magic_candidates(&serde_json::json!({})).is_err());
+    }
 
     #[test]
     fn legacy_config_deserializes_with_new_defaults() {

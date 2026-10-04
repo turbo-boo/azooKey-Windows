@@ -1,4 +1,4 @@
-use azookey_server::{parse_magic_candidates, TonicNamedPipeServer};
+use azookey_server::TonicNamedPipeServer;
 use tonic::{transport::Server, Request, Response, Status};
 use tonic_reflection::server::Builder as ReflectionBuilder;
 
@@ -11,7 +11,7 @@ use shared::proto::{
     MoveCursorRequest, MoveCursorResponse, PredictionSuggestion, RemoveTextRequest,
     RemoveTextResponse, ShrinkTextRequest, ShrinkTextResponse, Suggestion,
 };
-use shared::AppConfig;
+use shared::{parse_magic_candidates, AppConfig};
 
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::time::Duration;

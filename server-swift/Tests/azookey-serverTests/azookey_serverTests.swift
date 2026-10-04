@@ -1,4 +1,5 @@
 import Testing
+import KanaKanjiConverterModule
 @testable import azookey_server
 
 @Test func dictionaryReadingNormalizesHiraganaOnly() {
@@ -31,16 +32,8 @@ import Testing
         text: "Shift",
         value: -10,
         correspondingCount: 5,
-        lastMid: MIDData.一般.mid,
-        data: [
-            DicdataElement(
-                word: "Shift",
-                ruby: "shift",
-                cid: CIDData.固有名詞.cid,
-                mid: MIDData.一般.mid,
-                value: -10
-            )
-        ]
+        lastMid: 0,
+        data: []
     )
 
     #expect(candidateDisplayText(candidate) == "Shift")

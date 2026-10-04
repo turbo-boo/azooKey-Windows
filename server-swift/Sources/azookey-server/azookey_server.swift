@@ -157,20 +157,11 @@ func normalizeDictionaryReading(_ input: String) -> String {
     converter.sendToDicdataStore(.importDynamicUserDict(entries))
 }
 
-func constructCandidateString(candidate: Candidate, hiragana: String) -> String {
-    var remainingHiragana = hiragana
-    var result = ""
-    
-    for data in candidate.data {
-        if remainingHiragana.count < data.ruby.count {
-            result += remainingHiragana
-            break
-        }
-        remainingHiragana.removeFirst(data.ruby.count)
-        result += data.word
-    }
-    
-    return result
+func candidateDisplayText(_ candidate: Candidate) -> String {
+    // ConversionResult.mainResults is already display-ready. Reconstructing the
+    // surface from convertTarget and ruby breaks mixed Roman/Kana input because
+    // roman2kana's intermediate target can differ from Candidate.text.
+    candidate.text
 }
 
 @_silgen_name("LoadConfig")
@@ -410,7 +401,7 @@ func to_list_pointer(_ list: [FFICandidate]) -> UnsafeMutablePointer<UnsafeMutab
     for i in 0..<converted.mainResults.count {
         let candidate = converted.mainResults[i]
 
-        let text = strdup(constructCandidateString(candidate: candidate, hiragana: hiragana))
+        let text = strdup(candidateDisplayText(candidate))
         let hiragana = strdup(hiragana)
         let correspondingCount = candidate.correspondingCount
 

@@ -66,8 +66,8 @@ jobs:
     - name: Install Swift
       uses: compnerd/gha-setup-swift@main
       with:
-        branch: swift-6.0.2-release
-        tag: 6.0.2-RELEASE
+        swift-version: swift-6.0.2-release
+        swift-build: 6.0.2-RELEASE
 
     - name: Fix swift sdk
       shell: pwsh
@@ -81,7 +81,7 @@ jobs:
       uses: arduino/setup-protoc@v3
 
     - name: Install cargo-make
-      run: cargo install --force cargo-make
+      run: cargo install cargo-make --locked
 
     - name: Download prebuilt llama
       run: |

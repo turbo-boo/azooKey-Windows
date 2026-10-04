@@ -68,6 +68,22 @@ impl ITfCompositionSink_Impl for TextServiceFactory_Impl {
     }
 }
 
+fn conversion_key_action(is_converted: bool) -> ClientAction {
+    if is_converted {
+        ClientAction::SetSelection(SetSelectionType::Down)
+    } else {
+        ClientAction::RequestConversion
+    }
+}
+
+fn candidate_is_learnable(candidates: &Candidates, index: usize) -> bool {
+    candidates.is_converted
+        && candidates
+            .candidate_ids
+            .get(index)
+            .is_some_and(|id| *id >= 0)
+}
+
 impl TextServiceFactory {
     #[tracing::instrument]
     pub fn has_active_composition(&self) -> Result<bool> {
@@ -201,7 +217,7 @@ impl TextServiceFactory {
                 ),
                 UserAction::Space | UserAction::Tab => (
                     CompositionState::Previewing,
-                    vec![ClientAction::SetSelection(SetSelectionType::Down)],
+                    vec![conversion_key_action(composition.candidates.is_converted)],
                 ),
                 UserAction::Function(key) => match key {
                     Function::Five => (
@@ -310,7 +326,7 @@ impl TextServiceFactory {
                 ),
                 UserAction::Space | UserAction::Tab => (
                     CompositionState::Previewing,
-                    vec![ClientAction::SetSelection(SetSelectionType::Down)],
+                    vec![conversion_key_action(composition.candidates.is_converted)],
                 ),
                 UserAction::Function(key) => match key {
                     Function::Five => (
@@ -450,7 +466,6 @@ impl TextServiceFactory {
                 ClientAction::StartComposition => {
                     self.start_composition()?;
                     self.update_pos()?;
-                    ipc_service.show_window()?;
                 }
                 ClientAction::EndComposition => {
                     self.end_composition()?;
@@ -507,12 +522,44 @@ impl TextServiceFactory {
                     preview = text.clone();
                     suffix = sub_text.clone();
                     raw_hiragana = hiragana.clone();
-                    should_learn_candidate =
-                        candidates.candidate_ids.get(selection_index as usize).is_some();
+                    should_learn_candidate = candidate_is_learnable(&candidates, selection_index as usize);
+
+                    self.set_text(&text, &sub_text)?;
+                    if candidates.is_converted {
+                        ipc_service.set_candidates(candidates.texts.clone())?;
+                        ipc_service.set_selection(selection_index as i32)?;
+                        ipc_service.show_window()?;
+                    } else {
+                        ipc_service.hide_window()?;
+                        ipc_service.set_candidates(vec![])?;
+                    }
+                }
+                ClientAction::RequestConversion => {
+                    let converted = ipc_service.request_conversion()?;
+                    if converted.texts.is_empty() {
+                        continue;
+                    }
+
+                    candidates = converted;
+                    selection_index = 0;
+                    let text = candidates.texts[0].clone();
+                    let sub_text = candidates.sub_texts[0].clone();
+                    corresponding_count = candidates.corresponding_count[0];
+                    preview = text.clone();
+                    suffix = sub_text.clone();
+                    if !candidates.hiragana.is_empty() {
+                        raw_hiragana = candidates.hiragana.clone();
+                    }
+                    should_learn_candidate = candidates
+                        .candidate_ids
+                        .first()
+                        .is_some_and(|id| *id >= 0);
 
                     self.set_text(&text, &sub_text)?;
                     ipc_service.set_candidates(candidates.texts.clone())?;
-                    ipc_service.set_selection(selection_index as i32)?;
+                    ipc_service.set_selection(0)?;
+                    ipc_service.show_window()?;
+                    transition = CompositionState::Previewing;
                 }
                 ClientAction::CommitCandidate => {
                     if should_learn_candidate {
@@ -548,6 +595,7 @@ impl TextServiceFactory {
                             hiragana: String::new(),
                             corresponding_count: vec![0; predictions.texts.len()],
                             candidate_ids: predictions.prediction_ids,
+                            is_converted: true,
                         };
                         selection_index = 0;
                         preview.clear();
@@ -604,6 +652,7 @@ impl TextServiceFactory {
                             hiragana: String::new(),
                             corresponding_count: vec![0; predictions.texts.len()],
                             candidate_ids: predictions.prediction_ids,
+                            is_converted: true,
                         };
                         selection_index = 0;
                         ipc_service.set_candidates(candidates.texts.clone())?;
@@ -652,6 +701,7 @@ impl TextServiceFactory {
                             hiragana: raw_hiragana.clone(),
                             corresponding_count: vec![count; converted.len()],
                             candidate_ids: vec![],
+                            is_converted: true,
                         };
                         selection_index = 0;
                         corresponding_count = count;
@@ -661,6 +711,7 @@ impl TextServiceFactory {
                         self.set_text(&preview, "")?;
                         ipc_service.set_candidates(candidates.texts.clone())?;
                         ipc_service.set_selection(0)?;
+                        ipc_service.show_window()?;
                     }
                 }
                 ClientAction::RemoveText => {
@@ -714,12 +765,17 @@ impl TextServiceFactory {
                     preview = text.clone();
                     suffix = sub_text.clone();
                     raw_hiragana = hiragana;
-                    should_learn_candidate =
-                        candidates.candidate_ids.get(selection_index as usize).is_some();
+                    should_learn_candidate = candidate_is_learnable(&candidates, selection_index as usize);
 
                     self.set_text(&text, &sub_text)?;
-                    ipc_service.set_candidates(candidates.texts.clone())?;
-                    ipc_service.set_selection(selection_index as i32)?;
+                    if candidates.is_converted {
+                        ipc_service.set_candidates(candidates.texts.clone())?;
+                        ipc_service.set_selection(selection_index as i32)?;
+                        ipc_service.show_window()?;
+                    } else {
+                        ipc_service.hide_window()?;
+                        ipc_service.set_candidates(vec![])?;
+                    }
                 }
                 ClientAction::MoveCursor(_offset) => {
                     // TODO: I'll use azookey-kkc's composingText
@@ -779,8 +835,7 @@ impl TextServiceFactory {
                         preview = text.clone();
                         suffix = sub_text.clone();
                         raw_hiragana = hiragana.clone();
-                        should_learn_candidate =
-                            candidates.candidate_ids.get(selection_index as usize).is_some();
+                        should_learn_candidate = candidate_is_learnable(&candidates, selection_index as usize);
 
                         self.set_text(&text, &sub_text)?;
                     }
@@ -793,12 +848,16 @@ impl TextServiceFactory {
                         .skip(corresponding_count as usize)
                         .collect();
 
-                    ipc_service.shrink_text(corresponding_count.clone())?;
+                    let shrunk = ipc_service.shrink_text(corresponding_count)?;
                     let text = match mode {
                         InputMode::Kana => to_fullwidth(text, false),
                         InputMode::Latin => text.to_string(),
                     };
-                    candidates = ipc_service.append_text(text)?;
+                    candidates = if text.is_empty() {
+                        shrunk
+                    } else {
+                        ipc_service.append_text(text)?
+                    };
                     selection_index = 0;
 
                     let text = candidates.texts[selection_index as usize].clone();
@@ -810,11 +869,16 @@ impl TextServiceFactory {
                     preview = text.clone();
                     suffix = sub_text.clone();
                     raw_hiragana = hiragana.clone();
-                    should_learn_candidate =
-                        candidates.candidate_ids.get(selection_index as usize).is_some();
+                    should_learn_candidate = candidate_is_learnable(&candidates, selection_index as usize);
 
-                    ipc_service.set_candidates(candidates.texts.clone())?;
-                    ipc_service.set_selection(selection_index as i32)?;
+                    if candidates.is_converted {
+                        ipc_service.set_candidates(candidates.texts.clone())?;
+                        ipc_service.set_selection(selection_index as i32)?;
+                        ipc_service.show_window()?;
+                    } else {
+                        ipc_service.hide_window()?;
+                        ipc_service.set_candidates(vec![])?;
+                    }
                     self.update_pos()?;
 
                     transition = CompositionState::Composing;
@@ -848,5 +912,46 @@ impl TextServiceFactory {
         composition.corresponding_count = corresponding_count;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{candidate_is_learnable, conversion_key_action};
+    use crate::engine::{
+        client_action::{ClientAction, SetSelectionType},
+        ipc_service::Candidates,
+    };
+
+    #[test]
+    fn first_conversion_key_requests_candidates_when_live_conversion_is_off() {
+        assert_eq!(
+            conversion_key_action(false),
+            ClientAction::RequestConversion
+        );
+        assert_eq!(
+            conversion_key_action(true),
+            ClientAction::SetSelection(SetSelectionType::Down)
+        );
+    }
+
+    #[test]
+    fn synthetic_raw_candidate_is_never_learnable() {
+        let raw = Candidates {
+            texts: vec!["かな".to_string()],
+            sub_texts: vec![String::new()],
+            hiragana: "かな".to_string(),
+            corresponding_count: vec![2],
+            candidate_ids: vec![-1],
+            is_converted: false,
+        };
+        assert!(!candidate_is_learnable(&raw, 0));
+
+        let converted = Candidates {
+            is_converted: true,
+            candidate_ids: vec![0],
+            ..raw
+        };
+        assert!(candidate_is_learnable(&converted, 0));
     }
 }

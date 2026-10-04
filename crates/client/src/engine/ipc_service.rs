@@ -32,6 +32,7 @@ pub struct Candidates {
     pub hiragana: String,
     pub corresponding_count: Vec<i32>,
     pub candidate_ids: Vec<i32>,
+    pub is_converted: bool,
 }
 
 impl IPCService {
@@ -123,6 +124,7 @@ impl IPCService {
                     .iter()
                     .map(|s| s.candidate_id)
                     .collect(),
+                is_converted: composing_text.is_converted,
             }
         } else {
             anyhow::bail!("composing_text is None");
@@ -163,12 +165,43 @@ impl IPCService {
                     .iter()
                     .map(|s| s.candidate_id)
                     .collect(),
+                is_converted: composing_text.is_converted,
             }
         } else {
             anyhow::bail!("composing_text is None");
         };
 
         Ok(candidates)
+    }
+
+    #[tracing::instrument]
+    pub fn request_conversion(&mut self) -> anyhow::Result<Candidates> {
+        let request = tonic::Request::new(shared::proto::RequestConversionRequest {});
+        let response = self
+            .runtime
+            .clone()
+            .block_on(self.azookey_client.request_conversion(request))?;
+        let composing_text = response
+            .into_inner()
+            .composing_text
+            .ok_or_else(|| anyhow::anyhow!("composing_text is None"))?;
+
+        Ok(Candidates {
+            texts: composing_text.suggestions.iter().map(|s| s.text.clone()).collect(),
+            sub_texts: composing_text.suggestions.iter().map(|s| s.subtext.clone()).collect(),
+            hiragana: composing_text.hiragana,
+            corresponding_count: composing_text
+                .suggestions
+                .iter()
+                .map(|s| s.corresponding_count)
+                .collect(),
+            candidate_ids: composing_text
+                .suggestions
+                .iter()
+                .map(|s| s.candidate_id)
+                .collect(),
+            is_converted: composing_text.is_converted,
+        })
     }
 
     #[tracing::instrument]
@@ -281,6 +314,7 @@ impl IPCService {
                     .iter()
                     .map(|s| s.candidate_id)
                     .collect(),
+                is_converted: composing_text.is_converted,
             }
         } else {
             anyhow::bail!("composing_text is None");

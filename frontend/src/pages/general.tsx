@@ -18,6 +18,7 @@ type LearningMode = "inputAndOutput" | "onlyOutput" | "nothing";
 
 export const General = () => {
     const [learningMode, setLearningMode] = useState<LearningMode>("inputAndOutput");
+    const [liveConversionEnabled, setLiveConversionEnabled] = useState(true);
     const [predictionEnabled, setPredictionEnabled] = useState(false);
     const [magic, setMagic] = useState({
         enabled: false,
@@ -39,6 +40,7 @@ export const General = () => {
                 ) {
                     setLearningMode(mode);
                 }
+                setLiveConversionEnabled(data.live_conversion?.enabled ?? true);
                 setPredictionEnabled(data.prediction?.enabled ?? false);
                 setMagic((current) => ({ ...current, ...(data.magic_conversion ?? {}) }));
             })
@@ -67,6 +69,14 @@ export const General = () => {
         } catch {
             toast("設定の更新に失敗しました");
             return false;
+        }
+    };
+
+    const updateLiveConversion = async (enabled: boolean) => {
+        if (await updateGeneralConfig((data) => {
+            data.live_conversion = { enabled };
+        })) {
+            setLiveConversionEnabled(enabled);
         }
     };
 
@@ -153,6 +163,20 @@ export const General = () => {
                     <Button variant="destructive" onClick={resetLearning}>
                         リセット
                     </Button>
+                </div>
+            </section>
+
+            <section className="space-y-2">
+                <h1 className="text-sm font-bold text-foreground">ライブ変換</h1>
+                <div className="flex items-center space-x-4 rounded-md border p-4">
+                    <Brain />
+                    <div className="flex-1 space-y-1">
+                        <p className="text-sm font-medium leading-none">入力中に自動変換</p>
+                        <p className="text-xs text-muted-foreground">
+                            無効時は入力中の変換計算を行わず、SpaceまたはTabで変換します
+                        </p>
+                    </div>
+                    <Switch checked={liveConversionEnabled} onCheckedChange={updateLiveConversion} />
                 </div>
             </section>
 

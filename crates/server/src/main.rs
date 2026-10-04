@@ -39,6 +39,7 @@ unsafe extern "C" {
     fn GetComposedText(lengthPtr: *mut c_int) -> *mut *mut FFICandidate;
     fn CommitCandidate(candidateIndex: c_int);
     fn FlushLearning();
+    fn ResetLearning();
     fn LoadConfig();
 }
 
@@ -267,6 +268,14 @@ impl AzookeyService for MyAzookeyService {
     ) -> Result<Response<shared::proto::FlushLearningResponse>, Status> {
         unsafe { FlushLearning() };
         Ok(Response::new(shared::proto::FlushLearningResponse {}))
+    }
+
+    async fn reset_learning(
+        &self,
+        _: Request<shared::proto::ResetLearningRequest>,
+    ) -> Result<Response<shared::proto::ResetLearningResponse>, Status> {
+        unsafe { ResetLearning() };
+        Ok(Response::new(shared::proto::ResetLearningResponse {}))
     }
 }
 

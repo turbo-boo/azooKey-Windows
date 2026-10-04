@@ -70,6 +70,11 @@ impl ITfCompositionSink_Impl for TextServiceFactory_Impl {
 
 impl TextServiceFactory {
     #[tracing::instrument]
+    pub fn has_active_composition(&self) -> Result<bool> {
+        let text_service = self.borrow()?;
+        Ok(text_service.borrow_composition()?.state != CompositionState::None)
+    }
+
     pub fn process_key(
         &self,
         context: Option<&ITfContext>,
@@ -130,16 +135,10 @@ impl TextServiceFactory {
                     CompositionState::Composing,
                     vec![ClientAction::AppendText(number.to_string())],
                 ),
-                UserAction::Backspace => {
-                    if composition.preview.chars().count() == 1 {
-                        (
-                            CompositionState::None,
-                            vec![ClientAction::RemoveText, ClientAction::EndComposition],
-                        )
-                    } else {
-                        (CompositionState::Composing, vec![ClientAction::RemoveText])
-                    }
-                }
+                UserAction::Backspace => (
+                    CompositionState::Composing,
+                    vec![ClientAction::RemoveText],
+                )
                 UserAction::Enter => {
                     if composition.suffix.is_empty() {
                         if composition.should_learn_candidate {
@@ -169,7 +168,7 @@ impl TextServiceFactory {
                 }
                 UserAction::Escape => (
                     CompositionState::None,
-                    vec![ClientAction::RemoveText, ClientAction::EndComposition],
+                    vec![ClientAction::CancelComposition],
                 ),
                 UserAction::Navigation(direction) => match direction {
                     Navigation::Right => (
@@ -245,16 +244,10 @@ impl TextServiceFactory {
                         ClientAction::ShrinkText(number.to_string()),
                     ],
                 ),
-                UserAction::Backspace => {
-                    if composition.preview.chars().count() == 1 {
-                        (
-                            CompositionState::None,
-                            vec![ClientAction::RemoveText, ClientAction::EndComposition],
-                        )
-                    } else {
-                        (CompositionState::Composing, vec![ClientAction::RemoveText])
-                    }
-                }
+                UserAction::Backspace => (
+                    CompositionState::Composing,
+                    vec![ClientAction::RemoveText],
+                )
                 UserAction::Enter => {
                     if composition.suffix.is_empty() {
                         if composition.should_learn_candidate {
@@ -284,7 +277,7 @@ impl TextServiceFactory {
                 }
                 UserAction::Escape => (
                     CompositionState::None,
-                    vec![ClientAction::RemoveText, ClientAction::EndComposition],
+                    vec![ClientAction::CancelComposition],
                 ),
                 UserAction::Navigation(direction) => match direction {
                     Navigation::Right => (
@@ -463,10 +456,34 @@ impl TextServiceFactory {
                     suffix.clear();
                     raw_input.clear();
                     raw_hiragana.clear();
+                    candidates = Candidates::default();
                     should_learn_candidate = false;
                     ipc_service.hide_window()?;
                     ipc_service.set_candidates(vec![])?;
                     ipc_service.clear_text()?;
+                }
+                ClientAction::CancelComposition => {
+                    // Remove the marked text before ending the TSF composition so
+                    // shortcut keys and Escape do not commit a partial conversion.
+                    self.set_text("", "")?;
+                    self.end_composition()?;
+
+                    selection_index = 0;
+                    corresponding_count = 0;
+                    preview.clear();
+                    suffix.clear();
+                    raw_input.clear();
+                    raw_hiragana.clear();
+                    candidates = Candidates::default();
+                    should_learn_candidate = false;
+                    transition = CompositionState::None;
+
+                    ipc_service.hide_window()?;
+                    ipc_service.set_candidates(vec![])?;
+                    ipc_service.clear_text()?;
+                    if let Err(error) = ipc_service.clear_post_composition_predictions() {
+                        tracing::warn!("Failed to clear prediction state while cancelling: {error:?}");
+                    }
                 }
                 ClientAction::AppendText(text) => {
                     raw_input.push_str(&text);
@@ -644,6 +661,31 @@ impl TextServiceFactory {
                 }
                 ClientAction::RemoveText => {
                     candidates = ipc_service.remove_text()?;
+                    let hiragana = candidates.hiragana.clone();
+
+                    // The visible candidate can have a different character count
+                    // from the converter input. End the composition only after the
+                    // converter itself reports that no input remains.
+                    if hiragana.is_empty() {
+                        self.set_text("", "")?;
+                        self.end_composition()?;
+
+                        selection_index = 0;
+                        corresponding_count = 0;
+                        preview.clear();
+                        suffix.clear();
+                        raw_input.clear();
+                        raw_hiragana.clear();
+                        candidates = Candidates::default();
+                        should_learn_candidate = false;
+                        transition = CompositionState::None;
+
+                        ipc_service.hide_window()?;
+                        ipc_service.set_candidates(vec![])?;
+                        ipc_service.clear_text()?;
+                        continue;
+                    }
+
                     let empty = "".to_string();
                     let text = candidates
                         .texts
@@ -655,7 +697,6 @@ impl TextServiceFactory {
                         .get(selection_index as usize)
                         .cloned()
                         .unwrap_or(empty.clone());
-                    let hiragana = candidates.hiragana.clone();
                     corresponding_count = candidates
                         .corresponding_count
                         .get(selection_index as usize)
@@ -668,7 +709,7 @@ impl TextServiceFactory {
                         .collect();
                     preview = text.clone();
                     suffix = sub_text.clone();
-                    raw_hiragana = hiragana.clone();
+                    raw_hiragana = hiragana;
                     should_learn_candidate =
                         candidates.candidate_ids.get(selection_index as usize).is_some();
 

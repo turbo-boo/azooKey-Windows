@@ -41,6 +41,9 @@ jobs:
     - name: UI theme unit tests
       run: cargo test --locked -p ui
 
+    - name: Client pure unit tests
+      run: cargo test --locked -p azookey-windows --lib
+
     - name: Rust workspace check
       run: cargo check --locked --workspace --all-targets
 

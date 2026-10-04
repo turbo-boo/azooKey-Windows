@@ -33,6 +33,9 @@ jobs:
     - name: Shared unit tests
       run: cargo test -p shared
 
+    - name: Server pure unit tests
+      run: cargo test -p azookey-server --lib
+
     - name: Rust workspace check
       run: cargo check --workspace --all-targets
 

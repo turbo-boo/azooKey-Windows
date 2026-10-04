@@ -614,7 +614,7 @@ impl TextServiceFactory {
                     let source = if preview.is_empty() {
                         raw_hiragana.clone()
                     } else {
-                        preview.clone()
+                        format!("{preview}{suffix}")
                     };
                     let converted = match ipc_service.magic_convert(source) {
                         Ok(converted) => converted,

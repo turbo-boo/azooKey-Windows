@@ -72,7 +72,11 @@ impl TextServiceFactory {
     #[tracing::instrument]
     pub fn has_active_composition(&self) -> Result<bool> {
         let text_service = self.borrow()?;
-        Ok(text_service.borrow_composition()?.state != CompositionState::None)
+        let active = {
+            let composition = text_service.borrow_composition()?;
+            composition.state != CompositionState::None
+        };
+        Ok(active)
     }
 
     pub fn process_key(
@@ -138,7 +142,7 @@ impl TextServiceFactory {
                 UserAction::Backspace => (
                     CompositionState::Composing,
                     vec![ClientAction::RemoveText],
-                )
+                ),
                 UserAction::Enter => {
                     if composition.suffix.is_empty() {
                         if composition.should_learn_candidate {
@@ -247,7 +251,7 @@ impl TextServiceFactory {
                 UserAction::Backspace => (
                     CompositionState::Composing,
                     vec![ClientAction::RemoveText],
-                )
+                ),
                 UserAction::Enter => {
                     if composition.suffix.is_empty() {
                         if composition.should_learn_candidate {

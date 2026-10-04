@@ -26,6 +26,7 @@ pub struct ZenzaiConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
 pub struct LearningConfig {
     pub mode: String,
 }
@@ -45,11 +46,13 @@ pub struct UserDictionaryEntry {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(default)]
 pub struct UserDictionaryConfig {
     pub entries: Vec<UserDictionaryEntry>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
 pub struct ThemeConfig {
     pub mode: String,
     pub background_color: String,
@@ -79,6 +82,7 @@ impl Default for ThemeConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
 pub struct PersonalizationConfig {
     pub enabled: bool,
     /// Directory containing Tuner's original_*.marisa and lm_*.marisa files.
@@ -98,6 +102,7 @@ impl Default for PersonalizationConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
 pub struct PredictionConfig {
     pub enabled: bool,
     pub max_candidates: usize,
@@ -113,6 +118,7 @@ impl Default for PredictionConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
 pub struct MagicConversionConfig {
     pub enabled: bool,
     pub endpoint: String,
@@ -463,6 +469,28 @@ mod tests {
         assert!(!config.prediction.enabled);
         assert_eq!(config.prediction.max_candidates, 5);
         assert!(!config.magic_conversion.enabled);
+        assert_eq!(config.magic_conversion.timeout_seconds, 10);
+    }
+
+    #[test]
+    fn partial_nested_config_uses_section_defaults() {
+        let config: AppConfig = serde_json::from_str(
+            r#"{
+                "version":"0.1.0",
+                "zenzai":{"enable":true,"profile":"test","backend":"cpu"},
+                "theme":{"mode":"dark"},
+                "prediction":{"enabled":true},
+                "magic_conversion":{"enabled":true,"endpoint":"http://127.0.0.1:8080/v1/chat/completions"}
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.theme.mode, "dark");
+        assert_eq!(config.theme.text_color, "");
+        assert!(config.prediction.enabled);
+        assert_eq!(config.prediction.max_candidates, 5);
+        assert!(config.magic_conversion.enabled);
+        assert_eq!(config.magic_conversion.model, "gpt-4o-mini");
         assert_eq!(config.magic_conversion.timeout_seconds, 10);
     }
 

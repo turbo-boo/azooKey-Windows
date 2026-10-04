@@ -58,9 +58,13 @@ Filename: "icacls"; \
   Flags: runhidden postinstall runascurrentuser
 
 [UninstallRun]
-Filename: "schtasks"; \
+Filename: "{sys}\schtasks.exe"; \
   Parameters: "/Delete /TN ""Azookey Startup"" /F"; \
-  Flags: runhidden runascurrentuser
+  Flags: runhidden waituntilterminated
+
+[UninstallDelete]
+; Clean up the legacy launcher script created by older installers.
+Type: files; Name: "{app}\launch.vbs"
 
 [Code]
 function InitializeSetup: Boolean;
@@ -95,46 +99,75 @@ begin
     end;
   end;
 end;
-procedure UpdateTaskXml();
-var
-  TaskXmlPath: string;
-  TaskXmlContentAnsi: AnsiString;
-  TaskXmlContent: String;
-  Dummy: Integer;
+function EscapeXmlText(Value: String): String;
 begin
-  ExtractTemporaryFile('Azookey Startup.xml'); // ファイル展開
-  TaskXmlPath := ExpandConstant('{tmp}\Azookey Startup.xml');
-
-  LoadStringFromFile(TaskXmlPath, TaskXmlContentAnsi)
-
-  TaskXmlContent := String(TaskXmlContentAnsi);
-
-  StringChange(TaskXmlContent, 'PATH_TO_VBS', ExpandConstant('{app}\launch.vbs'));
-  TaskXmlContentAnsi := AnsiString(TaskXmlContent);
-  SaveStringToFile(TaskXmlPath, TaskXmlContentAnsi, False);
-
-  ShellExec('', 'schtasks', '/Create /F /TN "Azookey Startup" /XML "' + TaskXmlPath + '"', '', SW_HIDE, ewWaitUntilTerminated, Dummy);
-  ShellExec('', 'schtasks', '/Run /TN "Azookey Startup"', '', SW_HIDE, ewWaitUntilTerminated, Dummy);
+  Result := Value;
+  StringChangeEx(Result, '&', '&amp;', True);
+  StringChangeEx(Result, '<', '&lt;', True);
+  StringChangeEx(Result, '>', '&gt;', True);
 end;
 
-procedure CreateVbsFile();
+procedure ReplaceTaskPlaceholder(
+  var Lines: TArrayOfString;
+  Placeholder: String;
+  Value: String
+);
 var
-  VbsFile: string;
-  VbsContent: AnsiString;
+  I: Integer;
 begin
-  VbsFile := ExpandConstant('{app}\launch.vbs');
-  VbsContent :=
-    'Set objShell = CreateObject("WScript.Shell")' + #13#10 +
-    'objShell.Run "' + ExpandConstant('{app}\launcher.exe') + '", 0, False' + #13#10;
+  for I := 0 to GetArrayLength(Lines) - 1 do
+    StringChangeEx(Lines[I], Placeholder, Value, True);
+end;
 
-  if SaveStringToFile(VbsFile, VbsContent, False) then
-  begin
-    Log('VBS file created: ' + VbsFile);
-  end
-  else
-  begin
-    Log('Failed to create VBS file: ' + VbsFile);
-  end;
+procedure UpdateTaskXml();
+var
+  TaskXmlPath: String;
+  TaskXmlLines: TArrayOfString;
+  LauncherPath: String;
+  AppPath: String;
+  ResultCode: Integer;
+begin
+  ExtractTemporaryFile('Azookey Startup.xml');
+  TaskXmlPath := ExpandConstant('{tmp}\Azookey Startup.xml');
+
+  if not LoadStringsFromFile(TaskXmlPath, TaskXmlLines) then
+    RaiseException('Failed to read the startup task template.');
+
+  LauncherPath := EscapeXmlText(ExpandConstant('{app}\launcher.exe'));
+  AppPath := EscapeXmlText(ExpandConstant('{app}'));
+  ReplaceTaskPlaceholder(TaskXmlLines, 'PATH_TO_LAUNCHER', LauncherPath);
+  ReplaceTaskPlaceholder(TaskXmlLines, 'PATH_TO_APP', AppPath);
+
+  if not SaveStringsToUTF8File(TaskXmlPath, TaskXmlLines, False) then
+    RaiseException('Failed to write the startup task XML.');
+
+  if not ShellExec(
+    '',
+    ExpandConstant('{sys}\schtasks.exe'),
+    '/Create /F /TN "Azookey Startup" /XML "' + TaskXmlPath + '"',
+    ExpandConstant('{app}'),
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode
+  ) then
+    RaiseException('Failed to launch schtasks while creating the startup task.');
+
+  if ResultCode <> 0 then
+    RaiseException(Format('Failed to create the startup task (exit code %d).', [ResultCode]));
+
+  if not ShellExec(
+    '',
+    ExpandConstant('{sys}\schtasks.exe'),
+    '/Run /TN "Azookey Startup"',
+    ExpandConstant('{app}'),
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode
+  ) then
+    RaiseException('Failed to launch schtasks while starting Azookey.');
+
+  if ResultCode <> 0 then
+    RaiseException(Format('Failed to start the startup task (exit code %d).', [ResultCode]));
 end;
 
 procedure UninstallAzookey();
@@ -156,7 +189,8 @@ procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
   begin
-    CreateVbsFile();
+    // Remove the legacy script before replacing the scheduled task.
+    DeleteFile(ExpandConstant('{app}\launch.vbs'));
     UpdateTaskXml();
   end;
 end;

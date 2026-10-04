@@ -1,5 +1,8 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use shared::AppConfig;
 use std::io::{BufRead, BufReader};
+use std::os::windows::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::{env, thread};
 
@@ -21,8 +24,8 @@ fn main() -> anyhow::Result<()> {
     new_path = format!("{};{}", backend_path_str, new_path);
     env::set_var("PATH", &new_path);
 
-    let server_process = start_process("azookey-server.exe", "[server]");
-    let ui_process = start_process("ui.exe", "[ui]");
+    let server_process = start_process(&exe_path, "azookey-server.exe", "[server]");
+    let ui_process = start_process(&exe_path, "ui.exe", "[ui]");
 
     if let (Some(mut server), Some(mut ui)) = (server_process, ui_process) {
         let server_handle = thread::spawn(move || server.wait());
@@ -35,12 +38,17 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn start_process(exe: &str, prefix: &str) -> Option<Child> {
-    let mut child = Command::new(exe)
+fn start_process(base_dir: &std::path::Path, exe: &str, prefix: &str) -> Option<Child> {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let executable = base_dir.join(exe);
+    let mut child = Command::new(&executable)
+        .current_dir(base_dir)
+        .creation_flags(CREATE_NO_WINDOW)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect(&format!("Failed to start {}", exe));
+        .unwrap_or_else(|error| panic!("Failed to start {}: {error}", executable.display()));
 
     let stdout = child.stdout.take().expect("Failed to capture stdout");
     let stdout_reader = BufReader::new(stdout);

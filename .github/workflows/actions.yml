@@ -44,6 +44,28 @@ jobs:
     - name: Client pure unit tests
       run: cargo test --locked -p azookey-windows --lib
 
+    - name: Validate startup task template
+      shell: pwsh
+      run: |
+        [xml]$task = Get-Content "installer/Azookey Startup.xml" -Raw -Encoding UTF8
+        $ns = New-Object System.Xml.XmlNamespaceManager($task.NameTable)
+        $ns.AddNamespace("task", "http://schemas.microsoft.com/windows/2004/02/mit/task")
+        $exec = $task.SelectSingleNode("//task:Actions/task:Exec", $ns)
+        if ($null -eq $exec) { throw "Exec action is missing" }
+        if ($exec.Command -ne "PATH_TO_LAUNCHER") { throw "Unexpected task command" }
+        if ($exec.WorkingDirectory -ne "PATH_TO_APP") { throw "Unexpected task working directory" }
+        if ($null -ne $exec.Arguments) { throw "Legacy script arguments are still present" }
+
+        $installer = Get-Content "installer/Installer.iss" -Raw
+        if ($installer -match "CreateVbsFile|PATH_TO_VBS|wscript\.exe") {
+          throw "Legacy VBS startup path is still referenced by the installer"
+        }
+
+        $nsis = Get-Content "frontend/src-tauri/installer.nsi" -Raw
+        if ($nsis -notmatch 'schtasks\.exe" /Delete /TN "Azookey Startup" /F') {
+          throw "Tauri uninstaller does not clean the startup task"
+        }
+
     - name: Rust workspace check
       run: cargo check --locked --workspace --all-targets
 
@@ -124,6 +146,18 @@ jobs:
 
     - name: Build
       run: cargo make build --release
+
+    - name: Verify launcher has no console subsystem
+      shell: pwsh
+      run: |
+        $path = "build/launcher.exe"
+        $bytes = [System.IO.File]::ReadAllBytes($path)
+        $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+        $optionalHeader = $peOffset + 24
+        $subsystem = [BitConverter]::ToUInt16($bytes, $optionalHeader + 68)
+        if ($subsystem -ne 2) {
+          throw "launcher.exe must use IMAGE_SUBSYSTEM_WINDOWS_GUI (2), got $subsystem"
+        }
 
     - name: Upload Setup Artifact
       uses: actions/upload-artifact@v4

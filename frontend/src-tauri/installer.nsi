@@ -753,6 +753,16 @@ FunctionEnd
 
 Section Uninstall
 
+  ; The outer Inno installer normally owns this task, but the Tauri
+  ; uninstaller is also visible to uninstall tools. Clean it here too so
+  ; either uninstall path removes the autostart entry.
+  DetailPrint "Removing Azookey startup task"
+  ExecWait '"$SYSDIR\schtasks.exe" /Delete /TN "Azookey Startup" /F' $0
+  ${If} $0 <> 0
+    DetailPrint "Azookey startup task was not present or could not be removed (exit code $0)"
+  ${EndIf}
+  Delete "$APPDATA\Azookey\launch.vbs"
+
   !ifmacrodef NSIS_HOOK_PREUNINSTALL
     !insertmacro NSIS_HOOK_PREUNINSTALL
   !endif

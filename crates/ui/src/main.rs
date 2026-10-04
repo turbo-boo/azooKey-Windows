@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use azookey_server::TonicNamedPipeServer;
 use ipc::{WindowAction, WindowController, WindowService};
-use shared::proto::window_service_server::WindowServiceServer;
+use shared::{proto::window_service_server::WindowServiceServer, AppConfig};
 use tao::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use tao::platform::windows::{EventLoopBuilderExtWindows, WindowExtWindows};
 use tao::{
@@ -72,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
     let candidate_window = candidate::create_candidate_window(&event_loop)?;
     let candidate_webview_builder = candidate::create_candidate_webview()?;
     let candidate_webview = candidate_webview_builder
-        .with_devtools(true)
+        .with_devtools(cfg!(debug_assertions))
         .with_ipc_handler(move |message| {
             if let Ok(message) = serde_json::from_str::<serde_json::Value>(message.body()) {
                 if let Some(type_value) = message.get("type") {
@@ -88,6 +88,9 @@ async fn main() -> anyhow::Result<()> {
             }
         })
         .build(&candidate_window)?;
+
+    let theme_json = candidate::theme_payload(&AppConfig::read().theme);
+    candidate_webview.evaluate_script(&format!("applyTheme({})", theme_json))?;
 
     let indicator_window = indicator::create_indicator_window(&event_loop)?;
     let indicator_webview = indicator::create_indicator_webview(&indicator_window)?;
@@ -259,6 +262,13 @@ async fn main() -> anyhow::Result<()> {
                             ));
                         }
                         WindowAction::SetCandidate { candidates } => {
+                            let theme_json = candidate::theme_payload(&AppConfig::read().theme);
+                            if let Err(error) = candidate_webview
+                                .evaluate_script(&format!("applyTheme({})", theme_json))
+                            {
+                                eprintln!("Failed to apply candidate theme: {error}");
+                            }
+
                             let max_len = candidates
                                 .iter()
                                 .map(|s| s.chars().count())

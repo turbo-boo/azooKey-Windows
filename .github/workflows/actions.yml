@@ -5,6 +5,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   validate:
     runs-on: windows-latest
@@ -52,6 +55,21 @@ jobs:
           Cargo.lock
           frontend/package-lock.json
         if-no-files-found: error
+
+    - name: Commit resolved lockfiles
+      if: github.event_name == 'push' && github.ref == 'refs/heads/feature/remaining-features'
+      shell: pwsh
+      run: |
+        git add Cargo.lock frontend/package-lock.json
+        git diff --cached --quiet
+        if ($LASTEXITCODE -eq 0) {
+          Write-Host "Lockfiles are already current"
+          exit 0
+        }
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git commit -m "build: refresh dependency lockfiles"
+        git push origin HEAD:feature/remaining-features
 
   build:
     needs: validate

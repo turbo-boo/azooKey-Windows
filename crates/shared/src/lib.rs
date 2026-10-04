@@ -36,11 +36,24 @@ impl Default for LearningConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct UserDictionaryEntry {
+    pub reading: String,
+    pub word: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct UserDictionaryConfig {
+    pub entries: Vec<UserDictionaryEntry>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AppConfig {
     pub version: String,
     pub zenzai: ZenzaiConfig,
     #[serde(default)]
     pub learning: LearningConfig,
+    #[serde(default)]
+    pub dictionary: UserDictionaryConfig,
 }
 
 impl Default for AppConfig {
@@ -53,6 +66,7 @@ impl Default for AppConfig {
                 backend: "cpu".to_string(),
             },
             learning: LearningConfig::default(),
+            dictionary: UserDictionaryConfig::default(),
         }
     }
 }

@@ -25,6 +25,7 @@ struct FFICandidate {
     subtext: *mut c_char,
     hiragana: *mut c_char,
     corresponding_count: c_int,
+    candidate_index: c_int,
 }
 
 unsafe extern "C" {
@@ -36,6 +37,8 @@ unsafe extern "C" {
     fn ShrinkText(offset: c_int) -> *mut c_char;
     fn ClearText();
     fn GetComposedText(lengthPtr: *mut c_int) -> *mut *mut FFICandidate;
+    fn CommitCandidate(candidateIndex: c_int);
+    fn FlushLearning();
     fn LoadConfig();
 }
 
@@ -115,11 +118,13 @@ fn get_composed_text() -> Vec<Suggestion> {
                 .to_string_lossy()
                 .into_owned();
             let corresponding_count = candidate.corresponding_count;
+            let candidate_id = candidate.candidate_index;
 
             let suggestion = Suggestion {
                 text,
                 subtext,
                 corresponding_count,
+                candidate_id,
             };
 
             // check if suggestions have the same text
@@ -245,6 +250,23 @@ impl AzookeyService for MyAzookeyService {
     ) -> Result<Response<shared::proto::UpdateConfigResponse>, Status> {
         unsafe { LoadConfig() };
         Ok(Response::new(shared::proto::UpdateConfigResponse {}))
+    }
+
+    async fn commit_candidate(
+        &self,
+        request: Request<shared::proto::CommitCandidateRequest>,
+    ) -> Result<Response<shared::proto::CommitCandidateResponse>, Status> {
+        let candidate_id = request.into_inner().candidate_id;
+        unsafe { CommitCandidate(candidate_id) };
+        Ok(Response::new(shared::proto::CommitCandidateResponse {}))
+    }
+
+    async fn flush_learning(
+        &self,
+        _: Request<shared::proto::FlushLearningRequest>,
+    ) -> Result<Response<shared::proto::FlushLearningResponse>, Status> {
+        unsafe { FlushLearning() };
+        Ok(Response::new(shared::proto::FlushLearningResponse {}))
     }
 }
 

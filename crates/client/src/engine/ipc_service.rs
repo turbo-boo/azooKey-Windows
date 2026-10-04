@@ -25,6 +25,7 @@ pub struct Candidates {
     pub sub_texts: Vec<String>,
     pub hiragana: String,
     pub corresponding_count: Vec<i32>,
+    pub candidate_ids: Vec<i32>,
 }
 
 impl IPCService {
@@ -111,6 +112,11 @@ impl IPCService {
                     .iter()
                     .map(|s| s.corresponding_count)
                     .collect(),
+                candidate_ids: composing_text
+                    .suggestions
+                    .iter()
+                    .map(|s| s.candidate_id)
+                    .collect(),
             }
         } else {
             anyhow::bail!("composing_text is None");
@@ -146,6 +152,11 @@ impl IPCService {
                     .iter()
                     .map(|s| s.corresponding_count)
                     .collect(),
+                candidate_ids: composing_text
+                    .suggestions
+                    .iter()
+                    .map(|s| s.candidate_id)
+                    .collect(),
             }
         } else {
             anyhow::bail!("composing_text is None");
@@ -161,6 +172,26 @@ impl IPCService {
             .runtime
             .clone()
             .block_on(self.azookey_client.clear_text(request))?;
+
+        Ok(())
+    }
+
+    #[tracing::instrument]
+    pub fn commit_candidate(&mut self, candidate_id: i32) -> anyhow::Result<()> {
+        let request = tonic::Request::new(shared::proto::CommitCandidateRequest { candidate_id });
+        self.runtime
+            .clone()
+            .block_on(self.azookey_client.commit_candidate(request))?;
+
+        Ok(())
+    }
+
+    #[tracing::instrument]
+    pub fn flush_learning(&mut self) -> anyhow::Result<()> {
+        let request = tonic::Request::new(shared::proto::FlushLearningRequest {});
+        self.runtime
+            .clone()
+            .block_on(self.azookey_client.flush_learning(request))?;
 
         Ok(())
     }
@@ -191,6 +222,11 @@ impl IPCService {
                     .suggestions
                     .iter()
                     .map(|s| s.corresponding_count)
+                    .collect(),
+                candidate_ids: composing_text
+                    .suggestions
+                    .iter()
+                    .map(|s| s.candidate_id)
                     .collect(),
             }
         } else {

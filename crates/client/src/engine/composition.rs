@@ -504,7 +504,17 @@ impl TextServiceFactory {
                     should_learn_candidate = false;
                 }
                 ClientAction::LoadPredictions => {
-                    let predictions = ipc_service.get_post_composition_predictions()?;
+                    let predictions = match ipc_service.get_post_composition_predictions() {
+                        Ok(predictions) => predictions,
+                        Err(error) => {
+                            tracing::warn!("Failed to load post-composition predictions: {error:?}");
+                            candidates = Candidates::default();
+                            transition = CompositionState::None;
+                            ipc_service.hide_window()?;
+                            ipc_service.set_candidates(vec![])?;
+                            continue;
+                        }
+                    };
                     if predictions.texts.is_empty() {
                         candidates = Candidates::default();
                         transition = CompositionState::None;
@@ -548,7 +558,18 @@ impl TextServiceFactory {
                     self.update_pos()?;
                     self.end_composition()?;
 
-                    let predictions = ipc_service.commit_prediction(prediction_id)?;
+                    let predictions = match ipc_service.commit_prediction(prediction_id) {
+                        Ok(predictions) => predictions,
+                        Err(error) => {
+                            tracing::warn!("Failed to update post-composition predictions: {error:?}");
+                            candidates = Candidates::default();
+                            selection_index = 0;
+                            ipc_service.hide_window()?;
+                            ipc_service.set_candidates(vec![])?;
+                            transition = CompositionState::None;
+                            continue;
+                        }
+                    };
                     if predictions.texts.is_empty() {
                         candidates = Candidates::default();
                         selection_index = 0;
@@ -595,7 +616,13 @@ impl TextServiceFactory {
                     } else {
                         preview.clone()
                     };
-                    let converted = ipc_service.magic_convert(source)?;
+                    let converted = match ipc_service.magic_convert(source) {
+                        Ok(converted) => converted,
+                        Err(error) => {
+                            tracing::warn!("Magic conversion failed: {error:?}");
+                            continue;
+                        }
+                    };
                     if !converted.is_empty() {
                         let count = raw_hiragana.chars().count() as i32;
                         candidates = Candidates {

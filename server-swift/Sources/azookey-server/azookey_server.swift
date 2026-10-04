@@ -12,14 +12,30 @@ import ffi
 @MainActor var config: [String : Any] = [
     "enable": false,
     "profile": "",
+    "learningMode": "inputAndOutput",
 ]
 
-@MainActor func getOptions(context: String = "") -> ConvertRequestOptions {
+@MainActor func getLearningType() -> LearningType {
+    switch config["learningMode"] as? String {
+    case "onlyOutput":
+        return .onlyOutput
+    case "nothing":
+        return .nothing
+    default:
+        return .inputAndOutput
+    }
+}
+
+@MainActor func getOptions(
+    context: String = "",
+    shouldResetMemory: Bool = false
+) -> ConvertRequestOptions {
     return ConvertRequestOptions(
         requireJapanesePrediction: true,
         requireEnglishPrediction: false,
         keyboardLanguage: .ja_JP,
-        learningType: .inputAndOutput,
+        learningType: getLearningType(),
+        shouldResetMemory: shouldResetMemory,
         dictionaryResourceURL: execURL.appendingPathComponent("Dictionary"),
         memoryDirectoryURL: learningMemoryURL,
         sharedContainerURL: appDataURL,
@@ -92,6 +108,11 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
                 if let profileValue = zenzaiDict["profile"] as? String {
                     config["profile"] = profileValue
                 }
+            }
+
+            if let learningDict = json["learning"] as? [String: Any],
+               let mode = learningDict["mode"] as? String {
+                config["learningMode"] = mode
             }
         } catch {
             print("Failed to read settings: \(error)")
@@ -194,6 +215,13 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
 @_silgen_name("FlushLearning")
 @MainActor public func flush_learning() {
     converter.sendToDicdataStore(.closeKeyboard)
+}
+
+@_silgen_name("ResetLearning")
+@MainActor public func reset_learning() {
+    converter.sendToDicdataStore(
+        .setRequestOptions(getOptions(shouldResetMemory: true))
+    )
 }
 
 func to_list_pointer(_ list: [FFICandidate]) -> UnsafeMutablePointer<UnsafeMutablePointer<FFICandidate>?> {

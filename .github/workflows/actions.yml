@@ -19,6 +19,8 @@ jobs:
 
     - name: Install Protoc
       uses: arduino/setup-protoc@v3
+      with:
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Install node dependencies
       run: |
@@ -79,6 +81,8 @@ jobs:
 
     - name: Install Protoc
       uses: arduino/setup-protoc@v3
+      with:
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Install cargo-make
       run: cargo install cargo-make --locked

@@ -75,8 +75,34 @@ jobs:
         cd frontend
         npm install
 
+    - name: Frontend typecheck and build
+      run: |
+        cd frontend
+        npm run build
+
+    - name: Shared unit tests
+      run: cargo test -p shared
+
+    - name: Server pure unit tests
+      run: cargo test -p azookey-server --lib
+
+    - name: Swift unit tests
+      run: swift test --package-path server-swift
+
+    - name: Rust workspace check
+      run: cargo check --workspace --all-targets
+
     - name: Build
       run: cargo make build --release
+
+    - name: Upload resolved lockfiles
+      uses: actions/upload-artifact@v4
+      with:
+        name: resolved-lockfiles
+        path: |
+          Cargo.lock
+          frontend/package-lock.json
+        if-no-files-found: error
 
     - name: Upload Setup Artifact
       uses: actions/upload-artifact@v4

@@ -347,7 +347,9 @@ mod tests {
         assert_eq!(config.theme.mode, "system");
         assert!(!config.personalization.enabled);
         assert!(!config.prediction.enabled);
+        assert_eq!(config.prediction.max_candidates, 5);
         assert!(!config.magic_conversion.enabled);
+        assert_eq!(config.magic_conversion.timeout_seconds, 10);
     }
 
     #[test]
@@ -381,6 +383,29 @@ mod tests {
     #[test]
     fn dictionary_parser_rejects_empty_input() {
         assert!(parse_user_dictionary("\n# comment\n", Some("tsv")).is_err());
+    }
+
+    #[test]
+    fn tuner_directory_requires_all_base_and_personal_models() {
+        let root = std::env::temp_dir().join(format!("azookey-tuner-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        assert!(validate_tuner_directory(&root).is_err());
+
+        for prefix in ["original", "lm"] {
+            for suffix in TUNER_REQUIRED_SUFFIXES {
+                std::fs::write(root.join(format!("{prefix}{suffix}")), b"test").unwrap();
+            }
+        }
+
+        assert!(validate_tuner_directory(&root).is_ok());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn malformed_json_dictionary_is_rejected() {
+        assert!(parse_user_dictionary("{not-json}", Some("json")).is_err());
     }
 
     #[test]

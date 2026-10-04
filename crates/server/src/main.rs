@@ -1,4 +1,4 @@
-use azookey_server::TonicNamedPipeServer;
+use azookey_server::{parse_magic_candidates, TonicNamedPipeServer};
 use tonic::{transport::Server, Request, Response, Status};
 use tonic_reflection::server::Builder as ReflectionBuilder;
 
@@ -194,50 +194,6 @@ fn shrink_text(offset: i8) -> RawComposingText {
     }
 }
 
-fn parse_magic_candidates(value: &serde_json::Value) -> Result<Vec<String>, String> {
-    let choices = value
-        .get("choices")
-        .and_then(|value| value.as_array())
-        .ok_or_else(|| "APIレスポンスにchoicesがありません".to_string())?;
-
-    let mut candidates = Vec::new();
-    for choice in choices {
-        let Some(content) = choice
-            .get("message")
-            .and_then(|message| message.get("content"))
-            .and_then(|value| value.as_str())
-        else {
-            continue;
-        };
-
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) {
-            if let Some(predictions) = parsed.get("predictions").and_then(|value| value.as_array()) {
-                for prediction in predictions {
-                    if let Some(text) = prediction.as_str() {
-                        let text = text.trim();
-                        if !text.is_empty() && !candidates.iter().any(|item| item == text) {
-                            candidates.push(text.to_string());
-                        }
-                    }
-                }
-                continue;
-            }
-        }
-
-        let text = content.trim();
-        if !text.is_empty() && !candidates.iter().any(|item| item == text) {
-            candidates.push(text.to_string());
-        }
-    }
-
-    candidates.truncate(5);
-    if candidates.is_empty() {
-        Err("APIレスポンスから候補を取得できませんでした".to_string())
-    } else {
-        Ok(candidates)
-    }
-}
-
 async fn request_magic_conversion(text: &str) -> Result<Vec<String>, String> {
     let config = AppConfig::read();
     let magic = config.magic_conversion;
@@ -267,33 +223,13 @@ async fn request_magic_conversion(text: &str) -> Result<Vec<String>, String> {
         "messages": [
             {
                 "role": "system",
-                "content": "日本語入力支援です。入力文をユーザーの指示に従って自然に書き換え、3〜5個の候補だけを返してください。"
+                "content": "日本語入力支援です。入力文をユーザーの指示に従って自然に書き換えてください。返答は {\"predictions\":[\"候補1\",\"候補2\",\"候補3\"]} のJSONだけにしてください。候補は1〜5個にしてください。"
             },
             {
                 "role": "user",
                 "content": format!("指示: {}\n入力: {}", magic.instruction, text)
             }
-        ],
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "azookey_magic_conversion",
-                "strict": true,
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "predictions": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "minItems": 1,
-                            "maxItems": 5
-                        }
-                    },
-                    "required": ["predictions"],
-                    "additionalProperties": false
-                }
-            }
-        }
+        ]
     });
 
     let mut request = client.post(endpoint).json(&body);

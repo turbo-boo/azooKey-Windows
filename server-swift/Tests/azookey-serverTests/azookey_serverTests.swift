@@ -1,6 +1,26 @@
 import Testing
 @testable import azookey_server
 
-@Test func example() async throws {
-    // Write your test here and use APIs like `#expect(...)` to check expected conditions.
+@Test func dictionaryReadingNormalizesHiraganaOnly() {
+    #expect(normalizeDictionaryReading("あずーきーABC123") == "アズーキーABC123")
+}
+
+@Test @MainActor func predictionLimitIsClamped() {
+    let previous = config["predictionMaxCandidates"]
+    defer {
+        if let previous {
+            config["predictionMaxCandidates"] = previous
+        } else {
+            config.removeValue(forKey: "predictionMaxCandidates")
+        }
+    }
+
+    config["predictionMaxCandidates"] = 0
+    #expect(predictionLimit() == 1)
+
+    config["predictionMaxCandidates"] = 7
+    #expect(predictionLimit() == 7)
+
+    config["predictionMaxCandidates"] = 100
+    #expect(predictionLimit() == 10)
 }

@@ -117,3 +117,94 @@ impl TonicNamedPipeServer {
         }
     }
 }
+
+
+pub fn parse_magic_candidates(value: &serde_json::Value) -> Result<Vec<String>, String> {
+    let choices = value
+        .get("choices")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "APIレスポンスにchoicesがありません".to_string())?;
+
+    let mut candidates = Vec::new();
+    for choice in choices {
+        let Some(content) = choice
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(|value| value.as_str())
+        else {
+            continue;
+        };
+
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) {
+            if let Some(predictions) = parsed.get("predictions").and_then(|value| value.as_array()) {
+                for prediction in predictions {
+                    if let Some(text) = prediction.as_str() {
+                        let text = text.trim();
+                        if !text.is_empty() && !candidates.iter().any(|item| item == text) {
+                            candidates.push(text.to_string());
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+
+        let text = content.trim();
+        if !text.is_empty() && !candidates.iter().any(|item| item == text) {
+            candidates.push(text.to_string());
+        }
+    }
+
+    candidates.truncate(5);
+    if candidates.is_empty() {
+        Err("APIレスポンスから候補を取得できませんでした".to_string())
+    } else {
+        Ok(candidates)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_magic_candidates;
+
+    #[test]
+    fn parses_json_predictions_and_deduplicates() {
+        let value = serde_json::json!({
+            "choices": [
+                {"message": {"content": "{\"predictions\":[\"候補A\",\"候補B\",\"候補A\"]}"}}
+            ]
+        });
+        assert_eq!(
+            parse_magic_candidates(&value).unwrap(),
+            vec!["候補A".to_string(), "候補B".to_string()]
+        );
+    }
+
+    #[test]
+    fn accepts_plain_text_compatible_api_response() {
+        let value = serde_json::json!({
+            "choices": [
+                {"message": {"content": "自然な候補"}}
+            ]
+        });
+        assert_eq!(
+            parse_magic_candidates(&value).unwrap(),
+            vec!["自然な候補".to_string()]
+        );
+    }
+
+    #[test]
+    fn caps_candidates_at_five() {
+        let value = serde_json::json!({
+            "choices": [
+                {"message": {"content": "{\"predictions\":[\"1\",\"2\",\"3\",\"4\",\"5\",\"6\"]}"}}
+            ]
+        });
+        assert_eq!(parse_magic_candidates(&value).unwrap().len(), 5);
+    }
+
+    #[test]
+    fn rejects_missing_choices() {
+        assert!(parse_magic_candidates(&serde_json::json!({})).is_err());
+    }
+}

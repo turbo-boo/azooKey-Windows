@@ -6,7 +6,46 @@ on:
   workflow_dispatch:
 
 jobs:
+  validate:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Cache Rust
+      uses: Swatinem/rust-cache@v2
+
+    - name: Install Protoc
+      uses: arduino/setup-protoc@v3
+      with:
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Install node dependencies
+      run: |
+        cd frontend
+        npm ci
+
+    - name: Frontend typecheck and build
+      run: |
+        cd frontend
+        npm run build
+
+    - name: Shared unit tests
+      run: cargo test --locked -p shared
+
+    - name: Server pure unit tests
+      run: cargo test --locked -p azookey-server --lib
+
+    - name: UI theme unit tests
+      run: cargo test --locked -p ui
+
+    - name: Rust workspace check
+      run: cargo check --locked --workspace --all-targets
+
   build:
+    needs: validate
     runs-on: windows-latest
 
     steps:
@@ -20,8 +59,8 @@ jobs:
     - name: Install Swift
       uses: compnerd/gha-setup-swift@main
       with:
-        branch: swift-6.0.2-release
-        tag: 6.0.2-RELEASE
+        swift-version: swift-6.0.2-release
+        swift-build: 6.0.2-RELEASE
 
     - name: Fix swift sdk
       shell: pwsh
@@ -30,12 +69,14 @@ jobs:
         $modulemapUrl = "https://gist.githubusercontent.com/fkunn1326/ef8be2217082302b291f2b8d4178194a/raw/c424968c250afcd5afa1131aea1329dc0744a7f9/ucrt.modulemap"
         $destination = "$SwiftPath\share\ucrt.modulemap"
         Invoke-WebRequest -Uri $modulemapUrl -OutFile $destination
-    
+
     - name: Install Protoc
       uses: arduino/setup-protoc@v3
+      with:
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Install cargo-make
-      run: cargo install --force cargo-make
+      run: cargo install cargo-make --locked
 
     - name: Download prebuilt llama
       run: |
@@ -51,21 +92,18 @@ jobs:
           Remove-Item $tempZip
         }
 
-        # Create directories
         $llamaCpuDir = "llama_cpu"
         $llamaCudaDir = "llama_cuda"
         $llamaVulkanDir = "llama_vulkan"
         New-Item -Path $llamaCpuDir, $llamaCudaDir, $llamaVulkanDir -ItemType Directory -Force
 
-        # Download and extract files
         Download-Extract -url "https://github.com/fkunn1326/llama.cpp/releases/download/b4846/llama-b4846-bin-win-avx-x64.zip" -destFolder $llamaCpuDir
         Download-Extract -url "https://github.com/fkunn1326/llama.cpp/releases/download/b4846/llama-b4846-bin-win-cuda-cu12.4-x64.zip" -destFolder $llamaCudaDir
         Download-Extract -url "https://github.com/fkunn1326/llama.cpp/releases/download/b4846/llama-b4846-bin-win-vulkan-x64.zip" -destFolder $llamaVulkanDir
 
-        # Copy llama.lib to server-swift
         Copy-Item "$llamaCpuDir\llama.lib" -Destination "server-swift\" -Force
+        (Resolve-Path $llamaCpuDir).Path | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-        # Download the zenz model
         $zenzUrl = "https://huggingface.co/Miwa-Keita/zenz-v3-small-gguf/resolve/main/ggml-model-Q5_K_M.gguf"
         $zenzDest = "zenz.gguf"
         Invoke-WebRequest -Uri $zenzUrl -OutFile $zenzDest
@@ -73,7 +111,13 @@ jobs:
     - name: Install node dependencies
       run: |
         cd frontend
-        npm install
+        npm ci
+
+    - name: Swift unit tests
+      run: swift test --package-path server-swift
+
+    - name: Verify Cargo lockfile
+      run: cargo metadata --locked --no-deps > $null
 
     - name: Build
       run: cargo make build --release

@@ -5,17 +5,22 @@ use tonic_reflection::server::Builder as ReflectionBuilder;
 use shared::proto::azookey_service_server::{AzookeyService, AzookeyServiceServer};
 use shared::proto::{
     AppendTextRequest, AppendTextResponse, ClearTextRequest, ClearTextResponse, ComposingText,
-    MoveCursorRequest, MoveCursorResponse, RemoveTextRequest, RemoveTextResponse,
-    ShrinkTextRequest, ShrinkTextResponse, Suggestion,
+    ClearPostCompositionPredictionsRequest, ClearPostCompositionPredictionsResponse,
+    CommitPredictionRequest, CommitPredictionResponse, GetPostCompositionPredictionsRequest,
+    GetPostCompositionPredictionsResponse, MagicConvertRequest, MagicConvertResponse,
+    MoveCursorRequest, MoveCursorResponse, PredictionSuggestion, RemoveTextRequest,
+    RemoveTextResponse, ShrinkTextRequest, ShrinkTextResponse, Suggestion,
 };
+use shared::{parse_magic_candidates, validate_magic_endpoint_parts, AppConfig};
 
 use std::ffi::{c_char, c_int, CStr, CString};
+use std::time::Duration;
 
 const USE_ZENZAI: bool = true;
 
 struct RawComposingText {
     text: String,
-    cursor: i8,
+    cursor: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +45,9 @@ unsafe extern "C" {
     fn CommitCandidate(candidateIndex: c_int);
     fn FlushLearning();
     fn ResetLearning();
+    fn GetPostCompositionPredictions(lengthPtr: *mut c_int) -> *mut *mut FFICandidate;
+    fn CommitPrediction(predictionIndex: c_int);
+    fn ClearPostCompositionPredictions();
     fn LoadConfig();
 }
 
@@ -61,7 +69,7 @@ fn add_text(input: &str) -> RawComposingText {
 
         RawComposingText {
             text: text.to_string(),
-            cursor: cursor as i8,
+            cursor,
         }
     }
 }
@@ -78,7 +86,7 @@ fn move_cursor(offset: i8) -> RawComposingText {
 
         RawComposingText {
             text: text.to_string(),
-            cursor: cursor as i8,
+            cursor,
         }
     }
 }
@@ -93,7 +101,7 @@ fn remove_text() -> RawComposingText {
 
         RawComposingText {
             text: text.to_string(),
-            cursor: cursor as i8,
+            cursor,
         }
     }
 }
@@ -142,6 +150,36 @@ fn get_composed_text() -> Vec<Suggestion> {
     }
 }
 
+fn get_post_composition_predictions() -> Vec<PredictionSuggestion> {
+    unsafe {
+        let mut length: c_int = 0;
+        let result = GetPostCompositionPredictions(&mut length);
+        let mut suggestions = Vec::with_capacity(length as usize);
+
+        for index in 0..length as usize {
+            let candidate = (**result.add(index)).clone();
+            suggestions.push(PredictionSuggestion {
+                text: CStr::from_ptr(candidate.text).to_string_lossy().into_owned(),
+                prediction_id: candidate.candidate_index,
+            });
+        }
+        suggestions
+    }
+}
+
+fn commit_prediction(prediction_id: i32) -> Vec<PredictionSuggestion> {
+    unsafe {
+        CommitPrediction(prediction_id);
+    }
+    get_post_composition_predictions()
+}
+
+fn clear_post_composition_predictions() {
+    unsafe {
+        ClearPostCompositionPredictions();
+    }
+}
+
 fn shrink_text(offset: i8) -> RawComposingText {
     unsafe {
         let offset = c_int::from(offset);
@@ -154,6 +192,60 @@ fn shrink_text(offset: i8) -> RawComposingText {
             cursor: 0,
         }
     }
+}
+
+async fn request_magic_conversion(text: &str) -> Result<Vec<String>, String> {
+    let config = AppConfig::read();
+    let magic = config.magic_conversion;
+    if !magic.enabled {
+        return Err("いい感じ変換が無効です".to_string());
+    }
+    if text.trim().is_empty() {
+        return Err("変換対象が空です".to_string());
+    }
+
+    let endpoint = reqwest::Url::parse(&magic.endpoint)
+        .map_err(|error| format!("APIエンドポイントが不正です: {error}"))?;
+    validate_magic_endpoint_parts(endpoint.scheme(), endpoint.host_str())?;
+    if magic.model.trim().is_empty() {
+        return Err("APIモデル名が空です".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(magic.timeout_seconds.clamp(1, 60)))
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    let body = serde_json::json!({
+        "model": magic.model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "日本語入力支援です。入力文をユーザーの指示に従って自然に書き換えてください。返答は {\"predictions\":[\"候補1\",\"候補2\",\"候補3\"]} のJSONだけにしてください。候補は1〜5個にしてください。"
+            },
+            {
+                "role": "user",
+                "content": format!("指示: {}\n入力: {}", magic.instruction, text)
+            }
+        ]
+    });
+
+    let mut request = client.post(endpoint).json(&body);
+    if !magic.api_key.trim().is_empty() {
+        request = request.bearer_auth(magic.api_key.trim());
+    }
+
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    let status = response.status();
+    let response_text = response.text().await.map_err(|error| error.to_string())?;
+    if !status.is_success() {
+        let compact = response_text.chars().take(500).collect::<String>();
+        return Err(format!("APIエラー {}: {}", status.as_u16(), compact));
+    }
+
+    let value: serde_json::Value = serde_json::from_str(&response_text)
+        .map_err(|error| format!("APIレスポンスのJSON解析に失敗しました: {error}"))?;
+    parse_magic_candidates(&value)
 }
 
 #[derive(Debug, Default)]
@@ -276,6 +368,43 @@ impl AzookeyService for MyAzookeyService {
     ) -> Result<Response<shared::proto::ResetLearningResponse>, Status> {
         unsafe { ResetLearning() };
         Ok(Response::new(shared::proto::ResetLearningResponse {}))
+    }
+
+    async fn magic_convert(
+        &self,
+        request: Request<MagicConvertRequest>,
+    ) -> Result<Response<MagicConvertResponse>, Status> {
+        let text = request.into_inner().text;
+        let candidates = request_magic_conversion(&text)
+            .await
+            .map_err(Status::failed_precondition)?;
+        Ok(Response::new(MagicConvertResponse { candidates }))
+    }
+
+    async fn get_post_composition_predictions(
+        &self,
+        _: Request<GetPostCompositionPredictionsRequest>,
+    ) -> Result<Response<GetPostCompositionPredictionsResponse>, Status> {
+        Ok(Response::new(GetPostCompositionPredictionsResponse {
+            suggestions: get_post_composition_predictions(),
+        }))
+    }
+
+    async fn commit_prediction(
+        &self,
+        request: Request<CommitPredictionRequest>,
+    ) -> Result<Response<CommitPredictionResponse>, Status> {
+        Ok(Response::new(CommitPredictionResponse {
+            suggestions: commit_prediction(request.into_inner().prediction_id),
+        }))
+    }
+
+    async fn clear_post_composition_predictions(
+        &self,
+        _: Request<ClearPostCompositionPredictionsRequest>,
+    ) -> Result<Response<ClearPostCompositionPredictionsResponse>, Status> {
+        clear_post_composition_predictions();
+        Ok(Response::new(ClearPostCompositionPredictionsResponse {}))
     }
 }
 

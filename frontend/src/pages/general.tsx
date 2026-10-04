@@ -6,7 +6,10 @@ import {
     SelectTrigger,
     SelectValue,
 } from "@/components/ui/select";
-import { Brain, ExternalLink, RefreshCcw, Trash2 } from "lucide-react";
+import { Brain, ExternalLink, RefreshCcw, Sparkles, Trash2 } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
@@ -15,6 +18,15 @@ type LearningMode = "inputAndOutput" | "onlyOutput" | "nothing";
 
 export const General = () => {
     const [learningMode, setLearningMode] = useState<LearningMode>("inputAndOutput");
+    const [predictionEnabled, setPredictionEnabled] = useState(false);
+    const [magic, setMagic] = useState({
+        enabled: false,
+        endpoint: "https://api.openai.com/v1/chat/completions",
+        model: "gpt-4o-mini",
+        api_key: "",
+        instruction: "自然で読みやすい別表現に変換してください。",
+        timeout_seconds: 10,
+    });
 
     useEffect(() => {
         invoke<any>("get_config")
@@ -27,6 +39,8 @@ export const General = () => {
                 ) {
                     setLearningMode(mode);
                 }
+                setPredictionEnabled(data.prediction?.enabled ?? false);
+                setMagic((current) => ({ ...current, ...(data.magic_conversion ?? {}) }));
             })
             .catch(() => {
                 toast("設定の読み込みに失敗しました");
@@ -41,6 +55,41 @@ export const General = () => {
             setLearningMode(mode);
         } catch {
             toast("学習設定の更新に失敗しました");
+        }
+    };
+
+    const updateGeneralConfig = async (updater: (config: any) => void) => {
+        try {
+            const data = await invoke<any>("get_config");
+            updater(data);
+            await invoke("update_config", { newConfig: data });
+            return true;
+        } catch {
+            toast("設定の更新に失敗しました");
+            return false;
+        }
+    };
+
+    const updatePrediction = async (enabled: boolean) => {
+        if (await updateGeneralConfig((data) => {
+            data.prediction.enabled = enabled;
+        })) {
+            setPredictionEnabled(enabled);
+        }
+    };
+
+    const saveMagic = async () => {
+        if (!magic.endpoint.trim() || !magic.model.trim()) {
+            toast("APIエンドポイントとモデル名を入力してください");
+            return;
+        }
+        if (await updateGeneralConfig((data) => {
+            data.magic_conversion = {
+                ...magic,
+                timeout_seconds: Math.min(60, Math.max(1, Number(magic.timeout_seconds) || 10)),
+            };
+        })) {
+            toast("いい感じ変換の設定を保存しました");
         }
     };
 
@@ -104,6 +153,76 @@ export const General = () => {
                     <Button variant="destructive" onClick={resetLearning}>
                         リセット
                     </Button>
+                </div>
+            </section>
+
+            <section className="space-y-2">
+                <h1 className="text-sm font-bold text-foreground">予測変換</h1>
+                <div className="flex items-center space-x-4 rounded-md border p-4">
+                    <Brain />
+                    <div className="flex-1 space-y-1">
+                        <p className="text-sm font-medium leading-none">日本語の予測候補</p>
+                        <p className="text-xs text-muted-foreground">
+                            変換確定後にKanaKanjiConverterの次入力候補を表示します
+                        </p>
+                    </div>
+                    <Switch checked={predictionEnabled} onCheckedChange={updatePrediction} />
+                </div>
+            </section>
+
+            <section className="space-y-3">
+                <h1 className="text-sm font-bold text-foreground">いい感じ変換</h1>
+                <div className="space-y-4 rounded-md border p-4">
+                    <div className="flex items-center gap-4">
+                        <Sparkles />
+                        <div className="flex-1">
+                            <p className="text-sm font-medium">F5でAI変換候補を生成</p>
+                            <p className="text-xs text-muted-foreground">
+                                通常入力中は通信せず、F5を押した時だけOpenAI互換APIへ送信します
+                            </p>
+                        </div>
+                        <Switch
+                            checked={magic.enabled}
+                            onCheckedChange={(enabled) => setMagic((current) => ({ ...current, enabled }))}
+                        />
+                    </div>
+                    <Input
+                        value={magic.endpoint}
+                        onChange={(event) => setMagic((current) => ({ ...current, endpoint: event.target.value }))}
+                        placeholder="API endpoint"
+                    />
+                    <div className="grid grid-cols-2 gap-3">
+                        <Input
+                            value={magic.model}
+                            onChange={(event) => setMagic((current) => ({ ...current, model: event.target.value }))}
+                            placeholder="model"
+                        />
+                        <Input
+                            type="password"
+                            value={magic.api_key}
+                            onChange={(event) => setMagic((current) => ({ ...current, api_key: event.target.value }))}
+                            placeholder="API key（ローカルAPIでは空欄可）"
+                        />
+                    </div>
+                    <Textarea
+                        value={magic.instruction}
+                        onChange={(event) => setMagic((current) => ({ ...current, instruction: event.target.value }))}
+                        placeholder="変換指示"
+                    />
+                    <div className="flex items-center justify-between">
+                        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                            タイムアウト（秒）
+                            <Input
+                                type="number"
+                                min={1}
+                                max={60}
+                                className="w-20"
+                                value={magic.timeout_seconds}
+                                onChange={(event) => setMagic((current) => ({ ...current, timeout_seconds: Number(event.target.value) }))}
+                            />
+                        </label>
+                        <Button onClick={saveMagic}>保存</Button>
+                    </div>
                 </div>
             </section>
 

@@ -78,6 +78,34 @@ message FlushLearningResponse {}
 message ResetLearningRequest {}
 message ResetLearningResponse {}
 
+message MagicConvertRequest {
+  string text = 1;
+}
+
+message MagicConvertResponse {
+  repeated string candidates = 1;
+}
+
+message PredictionSuggestion {
+  string text = 1;
+  int32 prediction_id = 2;
+}
+
+message GetPostCompositionPredictionsRequest {}
+message GetPostCompositionPredictionsResponse {
+  repeated PredictionSuggestion suggestions = 1;
+}
+
+message CommitPredictionRequest {
+  int32 prediction_id = 1;
+}
+message CommitPredictionResponse {
+  repeated PredictionSuggestion suggestions = 1;
+}
+
+message ClearPostCompositionPredictionsRequest {}
+message ClearPostCompositionPredictionsResponse {}
+
 
 // Service definition for text editing operations.
 service AzookeyService {
@@ -91,4 +119,8 @@ service AzookeyService {
   rpc CommitCandidate (CommitCandidateRequest) returns (CommitCandidateResponse);
   rpc FlushLearning (FlushLearningRequest) returns (FlushLearningResponse);
   rpc ResetLearning (ResetLearningRequest) returns (ResetLearningResponse);
+  rpc MagicConvert (MagicConvertRequest) returns (MagicConvertResponse);
+  rpc GetPostCompositionPredictions (GetPostCompositionPredictionsRequest) returns (GetPostCompositionPredictionsResponse);
+  rpc CommitPrediction (CommitPredictionRequest) returns (CommitPredictionResponse);
+  rpc ClearPostCompositionPredictions (ClearPostCompositionPredictionsRequest) returns (ClearPostCompositionPredictionsResponse);
 }

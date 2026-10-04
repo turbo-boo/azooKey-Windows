@@ -1,7 +1,11 @@
 mod ipc;
 
 use serde::{Deserialize, Serialize};
-use shared::AppConfig;
+use shared::{
+    decode_dictionary_bytes, dictionary_extension, export_user_dictionary_json,
+    export_user_dictionary_tsv, export_user_dictionary_tsv_utf16le, parse_user_dictionary,
+    validate_tuner_directory, AppConfig, UserDictionaryEntry,
+};
 use std::{path::PathBuf, sync::Mutex};
 
 #[derive(Debug)]
@@ -42,6 +46,36 @@ fn update_config(state: tauri::State<AppState>, new_config: AppConfig) {
 #[tauri::command]
 fn reset_learning(state: tauri::State<AppState>) {
     state.ipc.clone().reset_learning().unwrap();
+}
+
+#[tauri::command]
+fn import_dictionary_file(path: String) -> Result<Vec<UserDictionaryEntry>, String> {
+    let path = PathBuf::from(path);
+    let bytes = std::fs::read(&path)
+        .map_err(|error| format!("辞書ファイルを読み込めませんでした: {error}"))?;
+    let source = decode_dictionary_bytes(&bytes)?;
+    parse_user_dictionary(&source, dictionary_extension(&path))
+}
+
+#[tauri::command]
+fn export_dictionary_file(state: tauri::State<AppState>, path: String) -> Result<(), String> {
+    let path = PathBuf::from(path);
+    let config = state.settings.lock().map_err(|_| "設定のロックに失敗しました")?;
+    let extension = dictionary_extension(&path)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let output: Vec<u8> = match extension.as_str() {
+        "json" => export_user_dictionary_json(&config.dictionary.entries)?.into_bytes(),
+        "txt" => export_user_dictionary_tsv_utf16le(&config.dictionary.entries),
+        _ => export_user_dictionary_tsv(&config.dictionary.entries).into_bytes(),
+    };
+    std::fs::write(&path, output)
+        .map_err(|error| format!("辞書ファイルを書き込めませんでした: {error}"))
+}
+
+#[tauri::command]
+fn validate_tuner_model(path: String) -> Result<(), String> {
+    validate_tuner_directory(&PathBuf::from(path))
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -99,11 +133,15 @@ pub fn run() {
     tauri::Builder::default()
         .manage(app_state)
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             greet,
             get_config,
             update_config,
             reset_learning,
+            import_dictionary_file,
+            export_dictionary_file,
+            validate_tuner_model,
             check_capability
         ])
         .run(tauri::generate_context!())

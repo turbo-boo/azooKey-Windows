@@ -184,6 +184,13 @@ async fn main() -> anyhow::Result<()> {
                 UserEvent::WindowAction(action) => {
                     match action {
                         WindowAction::Show => {
+                            let theme_json = candidate::theme_payload(&AppConfig::read().theme);
+                            if let Err(error) = candidate_webview
+                                .evaluate_script(&format!("applyTheme({})", theme_json))
+                            {
+                                eprintln!("Failed to apply candidate theme: {error}");
+                            }
+
                             // if mode indicator is already shown, hide it
                             let mut task_guard = match task_guard.try_lock() {
                                 Ok(guard) => guard,
@@ -262,13 +269,6 @@ async fn main() -> anyhow::Result<()> {
                             ));
                         }
                         WindowAction::SetCandidate { candidates } => {
-                            let theme_json = candidate::theme_payload(&AppConfig::read().theme);
-                            if let Err(error) = candidate_webview
-                                .evaluate_script(&format!("applyTheme({})", theme_json))
-                            {
-                                eprintln!("Failed to apply candidate theme: {error}");
-                            }
-
                             let max_len = candidates
                                 .iter()
                                 .map(|s| s.chars().count())

@@ -308,6 +308,45 @@ pub fn dictionary_extension(path: &Path) -> Option<&str> {
     path.extension().and_then(|value| value.to_str())
 }
 
+pub fn decode_dictionary_bytes(bytes: &[u8]) -> Result<String, String> {
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        let payload = &bytes[2..];
+        if payload.len() % 2 != 0 {
+            return Err("UTF-16LE辞書のバイト数が不正です".to_string());
+        }
+        let units = payload
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<_>>();
+        return String::from_utf16(&units)
+            .map_err(|error| format!("UTF-16LE辞書の解析に失敗しました: {error}"));
+    }
+
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        let payload = &bytes[2..];
+        if payload.len() % 2 != 0 {
+            return Err("UTF-16BE辞書のバイト数が不正です".to_string());
+        }
+        let units = payload
+            .chunks_exact(2)
+            .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<_>>();
+        return String::from_utf16(&units)
+            .map_err(|error| format!("UTF-16BE辞書の解析に失敗しました: {error}"));
+    }
+
+    String::from_utf8(bytes.to_vec())
+        .map_err(|error| format!("辞書ファイルをUTF-8として解析できませんでした: {error}"))
+}
+
+pub fn export_user_dictionary_tsv_utf16le(entries: &[UserDictionaryEntry]) -> Vec<u8> {
+    let mut bytes = vec![0xFF, 0xFE];
+    for unit in export_user_dictionary_tsv(entries).encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    bytes
+}
+
 pub const TUNER_REQUIRED_SUFFIXES: [&str; 4] = [
     "_c_abc.marisa",
     "_r_xbx.marisa",
@@ -383,6 +422,36 @@ mod tests {
     #[test]
     fn dictionary_parser_rejects_empty_input() {
         assert!(parse_user_dictionary("\n# comment\n", Some("tsv")).is_err());
+    }
+
+    #[test]
+    fn dictionary_text_decoding_supports_utf8_and_utf16() {
+        let source = "あずーきー\tazooKey\t固有名詞\t";
+        assert_eq!(decode_dictionary_bytes(source.as_bytes()).unwrap(), source);
+
+        let mut le = vec![0xFF, 0xFE];
+        for unit in source.encode_utf16() {
+            le.extend_from_slice(&unit.to_le_bytes());
+        }
+        assert_eq!(decode_dictionary_bytes(&le).unwrap(), source);
+
+        let mut be = vec![0xFE, 0xFF];
+        for unit in source.encode_utf16() {
+            be.extend_from_slice(&unit.to_be_bytes());
+        }
+        assert_eq!(decode_dictionary_bytes(&be).unwrap(), source);
+    }
+
+    #[test]
+    fn ime_text_export_has_utf16le_bom_and_roundtrips() {
+        let entries = [UserDictionaryEntry {
+            reading: "あずーきー".into(),
+            word: "azooKey".into(),
+        }];
+        let bytes = export_user_dictionary_tsv_utf16le(&entries);
+        assert!(bytes.starts_with(&[0xFF, 0xFE]));
+        let decoded = decode_dictionary_bytes(&bytes).unwrap();
+        assert!(decoded.contains("あずーきー\tazooKey"));
     }
 
     #[test]

@@ -236,7 +236,7 @@ export const Zenzai = () => {
                         <Input
                             value={personalization.tuner_directory}
                             readOnly
-                            placeholder="Tunerのp13n_v1/lmフォルダー"
+                            placeholder="Tunerのp13n_v1フォルダー"
                             className="flex-1"
                         />
                         <Button type="button" variant="secondary" onClick={chooseTunerDirectory}>

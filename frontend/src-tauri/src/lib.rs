@@ -2,8 +2,9 @@ mod ipc;
 
 use serde::{Deserialize, Serialize};
 use shared::{
-    dictionary_extension, export_user_dictionary_json, export_user_dictionary_tsv,
-    parse_user_dictionary, validate_tuner_directory, AppConfig, UserDictionaryEntry,
+    decode_dictionary_bytes, dictionary_extension, export_user_dictionary_json,
+    export_user_dictionary_tsv, export_user_dictionary_tsv_utf16le, parse_user_dictionary,
+    validate_tuner_directory, AppConfig, UserDictionaryEntry,
 };
 use std::{path::PathBuf, sync::Mutex};
 
@@ -50,8 +51,9 @@ fn reset_learning(state: tauri::State<AppState>) {
 #[tauri::command]
 fn import_dictionary_file(path: String) -> Result<Vec<UserDictionaryEntry>, String> {
     let path = PathBuf::from(path);
-    let source = std::fs::read_to_string(&path)
+    let bytes = std::fs::read(&path)
         .map_err(|error| format!("辞書ファイルを読み込めませんでした: {error}"))?;
+    let source = decode_dictionary_bytes(&bytes)?;
     parse_user_dictionary(&source, dictionary_extension(&path))
 }
 
@@ -59,13 +61,13 @@ fn import_dictionary_file(path: String) -> Result<Vec<UserDictionaryEntry>, Stri
 fn export_dictionary_file(state: tauri::State<AppState>, path: String) -> Result<(), String> {
     let path = PathBuf::from(path);
     let config = state.settings.lock().map_err(|_| "設定のロックに失敗しました")?;
-    let output = match dictionary_extension(&path)
+    let extension = dictionary_extension(&path)
         .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "json" => export_user_dictionary_json(&config.dictionary.entries)?,
-        _ => export_user_dictionary_tsv(&config.dictionary.entries),
+        .to_ascii_lowercase();
+    let output: Vec<u8> = match extension.as_str() {
+        "json" => export_user_dictionary_json(&config.dictionary.entries)?.into_bytes(),
+        "txt" => export_user_dictionary_tsv_utf16le(&config.dictionary.entries),
+        _ => export_user_dictionary_tsv(&config.dictionary.entries).into_bytes(),
     };
     std::fs::write(&path, output)
         .map_err(|error| format!("辞書ファイルを書き込めませんでした: {error}"))

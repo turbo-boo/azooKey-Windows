@@ -45,6 +45,7 @@ pub struct Composition {
 
     pub selection_index: i32,
     pub candidates: Candidates,
+    pub should_learn_candidate: bool,
 
     pub state: CompositionState,
     pub tip_composition: Option<ITfComposition>,
@@ -359,6 +360,7 @@ impl TextServiceFactory {
         let mut raw_hiragana = composition.raw_hiragana.clone();
         let mut corresponding_count = composition.corresponding_count.clone();
         let mut candidates = composition.candidates.clone();
+        let mut should_learn_candidate = composition.should_learn_candidate;
         let mut selection_index = composition.selection_index;
         let mut ipc_service = IMEState::get()?
             .ipc_service
@@ -383,6 +385,7 @@ impl TextServiceFactory {
                     suffix.clear();
                     raw_input.clear();
                     raw_hiragana.clear();
+                    should_learn_candidate = false;
                     ipc_service.hide_window()?;
                     ipc_service.set_candidates(vec![])?;
                     ipc_service.flush_learning()?;
@@ -406,15 +409,22 @@ impl TextServiceFactory {
                     preview = text.clone();
                     suffix = sub_text.clone();
                     raw_hiragana = hiragana.clone();
+                    should_learn_candidate =
+                        candidates.candidate_ids.get(selection_index as usize).is_some();
 
                     self.set_text(&text, &sub_text)?;
                     ipc_service.set_candidates(candidates.texts.clone())?;
                     ipc_service.set_selection(selection_index as i32)?;
                 }
                 ClientAction::CommitCandidate => {
-                    if let Some(candidate_id) = candidates.candidate_ids.get(selection_index as usize) {
-                        ipc_service.commit_candidate(*candidate_id)?;
+                    if should_learn_candidate {
+                        if let Some(candidate_id) =
+                            candidates.candidate_ids.get(selection_index as usize)
+                        {
+                            ipc_service.commit_candidate(*candidate_id)?;
+                        }
                     }
+                    should_learn_candidate = false;
                 }
                 ClientAction::RemoveText => {
                     candidates = ipc_service.remove_text()?;
@@ -443,6 +453,8 @@ impl TextServiceFactory {
                     preview = text.clone();
                     suffix = sub_text.clone();
                     raw_hiragana = hiragana.clone();
+                    should_learn_candidate =
+                        candidates.candidate_ids.get(selection_index as usize).is_some();
 
                     self.set_text(&text, &sub_text)?;
                     ipc_service.set_candidates(candidates.texts.clone())?;
@@ -476,6 +488,7 @@ impl TextServiceFactory {
                     suffix.clear();
                     raw_input.clear();
                     raw_hiragana.clear();
+                    should_learn_candidate = false;
                     ipc_service.clear_text()?;
                 }
                 ClientAction::SetSelection(selection) => {
@@ -504,6 +517,8 @@ impl TextServiceFactory {
                     preview = text.clone();
                     suffix = sub_text.clone();
                     raw_hiragana = hiragana.clone();
+                    should_learn_candidate =
+                        candidates.candidate_ids.get(selection_index as usize).is_some();
 
                     self.set_text(&text, &sub_text)?;
                 }
@@ -532,6 +547,8 @@ impl TextServiceFactory {
                     preview = text.clone();
                     suffix = sub_text.clone();
                     raw_hiragana = hiragana.clone();
+                    should_learn_candidate =
+                        candidates.candidate_ids.get(selection_index as usize).is_some();
 
                     ipc_service.set_candidates(candidates.texts.clone())?;
                     ipc_service.set_selection(selection_index as i32)?;
@@ -548,6 +565,7 @@ impl TextServiceFactory {
                         SetTextType::HalfLatin => to_halfwidth(&raw_input),
                     };
 
+                    should_learn_candidate = false;
                     self.set_text(&text, "")?;
                 }
             }
@@ -562,6 +580,7 @@ impl TextServiceFactory {
         composition.raw_input = raw_input.clone();
         composition.raw_hiragana = raw_hiragana.clone();
         composition.candidates = candidates;
+        composition.should_learn_candidate = should_learn_candidate;
         composition.suffix = suffix.clone();
         composition.corresponding_count = corresponding_count;
 

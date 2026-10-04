@@ -36,6 +36,9 @@ jobs:
     - name: Server pure unit tests
       run: cargo test -p azookey-server --lib
 
+    - name: UI theme unit tests
+      run: cargo test -p ui
+
     - name: Rust workspace check
       run: cargo check --workspace --all-targets
 

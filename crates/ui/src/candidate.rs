@@ -343,3 +343,60 @@ pub fn create_candidate_webview<'a>() -> Result<WebViewBuilder<'a>> {
 
     Ok(webview_builder)
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::theme_payload;
+    use shared::ThemeConfig;
+
+    #[test]
+    fn theme_payload_preserves_safe_settings() {
+        let theme = ThemeConfig {
+            mode: "dark".to_string(),
+            background_color: "#101010".to_string(),
+            text_color: "#f0f0f0".to_string(),
+            accent_color: "#336699".to_string(),
+            selection_background: "#223344".to_string(),
+            selection_border: "#445566".to_string(),
+            background_image: String::new(),
+            custom_css_enabled: true,
+            custom_css: "main { opacity: 0.9; }".to_string(),
+        };
+
+        let value: serde_json::Value = serde_json::from_str(&theme_payload(&theme)).unwrap();
+        assert_eq!(value["mode"], "dark");
+        assert_eq!(value["background_color"], "#101010");
+        assert_eq!(value["custom_css_enabled"], true);
+        assert_eq!(value["custom_css"], "main { opacity: 0.9; }");
+        assert!(value["background_image"].is_null());
+    }
+
+    #[test]
+    fn unsupported_or_missing_background_image_is_not_exposed() {
+        let mut theme = ThemeConfig::default();
+        theme.background_image = "Z:/definitely-missing/background.bmp".to_string();
+
+        let value: serde_json::Value = serde_json::from_str(&theme_payload(&theme)).unwrap();
+        assert!(value["background_image"].is_null());
+    }
+
+    #[test]
+    fn supported_background_image_is_embedded_as_data_url() {
+        let path = std::env::temp_dir().join(format!(
+            "azookey-theme-test-{}.png",
+            std::process::id()
+        ));
+        std::fs::write(&path, [0x89, b'P', b'N', b'G']).unwrap();
+
+        let mut theme = ThemeConfig::default();
+        theme.background_image = path.to_string_lossy().into_owned();
+
+        let value: serde_json::Value = serde_json::from_str(&theme_payload(&theme)).unwrap();
+        assert!(value["background_image"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("data:image/png;base64,")));
+
+        std::fs::remove_file(path).unwrap();
+    }
+}

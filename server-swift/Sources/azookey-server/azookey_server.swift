@@ -6,20 +6,39 @@ import ffi
 @MainActor var composingText = ComposingText()
 
 @MainActor var execURL = URL(filePath: "")
+@MainActor var appDataURL = URL(filePath: "")
+@MainActor var learningMemoryURL = URL(filePath: "")
+@MainActor var lastCandidates: [Candidate] = []
 @MainActor var config: [String : Any] = [
     "enable": false,
     "profile": "",
+    "learningMode": "inputAndOutput",
 ]
 
-@MainActor func getOptions(context: String = "") -> ConvertRequestOptions {
+@MainActor func getLearningType() -> LearningType {
+    switch config["learningMode"] as? String {
+    case "onlyOutput":
+        return .onlyOutput
+    case "nothing":
+        return .nothing
+    default:
+        return .inputAndOutput
+    }
+}
+
+@MainActor func getOptions(
+    context: String = "",
+    shouldResetMemory: Bool = false
+) -> ConvertRequestOptions {
     return ConvertRequestOptions(
         requireJapanesePrediction: true,
         requireEnglishPrediction: false,
         keyboardLanguage: .ja_JP,
-        learningType: .nothing,
+        learningType: getLearningType(),
+        shouldResetMemory: shouldResetMemory,
         dictionaryResourceURL: execURL.appendingPathComponent("Dictionary"),
-        memoryDirectoryURL: URL(filePath: "./test"),
-        sharedContainerURL: URL(filePath: "./test"),
+        memoryDirectoryURL: learningMemoryURL,
+        sharedContainerURL: appDataURL,
         textReplacer: .init {
             return execURL.appendingPathComponent("EmojiDictionary").appendingPathComponent("emoji_all_E15.1.txt")
         },
@@ -79,15 +98,20 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
         
         do {
             let data = try Data(contentsOf: settingsPath)
-            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let zenzaiDict = json["zenzai"] as? [String: Any] {
-                
-                if let enableValue = zenzaiDict["enable"] as? Bool {
-                    config["enable"] = enableValue
+            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                if let zenzaiDict = json["zenzai"] as? [String: Any] {
+                    if let enableValue = zenzaiDict["enable"] as? Bool {
+                        config["enable"] = enableValue
+                    }
+
+                    if let profileValue = zenzaiDict["profile"] as? String {
+                        config["profile"] = profileValue
+                    }
                 }
-                
-                if let profileValue = zenzaiDict["profile"] as? String {
-                    config["profile"] = profileValue
+
+                if let learningDict = json["learning"] as? [String: Any],
+                   let mode = learningDict["mode"] as? String {
+                    config["learningMode"] = mode
                 }
             }
         } catch {
@@ -103,6 +127,22 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
 ) {
     let path = String(cString: path)
     execURL = URL(filePath: path)
+
+    if let appDataPath = ProcessInfo.processInfo.environment["APPDATA"] {
+        appDataURL = URL(filePath: appDataPath).appendingPathComponent("Azookey", isDirectory: true)
+    } else {
+        appDataURL = execURL.appendingPathComponent("UserData", isDirectory: true)
+    }
+    learningMemoryURL = appDataURL.appendingPathComponent("LearningMemory", isDirectory: true)
+
+    do {
+        try FileManager.default.createDirectory(
+            at: learningMemoryURL,
+            withIntermediateDirectories: true
+        )
+    } catch {
+        print("Failed to create learning memory directory: \(error)")
+    }
 
     load_config()
 
@@ -149,6 +189,39 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
 @_silgen_name("ClearText")
 @MainActor public func clear_text() {
     composingText = ComposingText()
+    lastCandidates = []
+}
+
+@_silgen_name("CommitCandidate")
+@MainActor public func commit_candidate(candidateIndex: Int32) {
+    let index = Int(candidateIndex)
+    guard lastCandidates.indices.contains(index) else {
+        print("CommitCandidate: invalid candidate index \(candidateIndex)")
+        return
+    }
+
+    let candidate = lastCandidates[index]
+    converter.updateLearningData(candidate)
+
+    var remainingText = composingText
+    remainingText.prefixComplete(correspondingCount: candidate.correspondingCount)
+    if remainingText.convertTarget.isEmpty {
+        converter.stopComposition()
+    } else {
+        converter.setCompletedData(candidate)
+    }
+}
+
+@_silgen_name("FlushLearning")
+@MainActor public func flush_learning() {
+    converter.sendToDicdataStore(.closeKeyboard)
+}
+
+@_silgen_name("ResetLearning")
+@MainActor public func reset_learning() {
+    converter.sendToDicdataStore(
+        .setRequestOptions(getOptions(shouldResetMemory: true))
+    )
 }
 
 func to_list_pointer(_ list: [FFICandidate]) -> UnsafeMutablePointer<UnsafeMutablePointer<FFICandidate>?> {
@@ -166,6 +239,7 @@ func to_list_pointer(_ list: [FFICandidate]) -> UnsafeMutablePointer<UnsafeMutab
     let contextString = (config["context"] as? String) ?? ""
     let options = getOptions(context: contextString)
     let converted = converter.requestCandidates(composingText, options: options)
+    lastCandidates = converted.mainResults
     var result: [FFICandidate] = []
 
     for i in 0..<converted.mainResults.count {
@@ -179,7 +253,13 @@ func to_list_pointer(_ list: [FFICandidate]) -> UnsafeMutablePointer<UnsafeMutab
         afterComposingText.prefixComplete(correspondingCount: correspondingCount)
         let subtext = strdup(afterComposingText.convertTarget)
 
-        result.append(FFICandidate(text: text, subtext: subtext, hiragana: hiragana, correspondingCount: Int32(correspondingCount)))        
+        result.append(FFICandidate(
+            text: text,
+            subtext: subtext,
+            hiragana: hiragana,
+            correspondingCount: Int32(correspondingCount),
+            candidateIndex: Int32(i)
+        ))        
     }
 
     lengthPtr.pointee = result.count

@@ -388,7 +388,6 @@ impl TextServiceFactory {
                     should_learn_candidate = false;
                     ipc_service.hide_window()?;
                     ipc_service.set_candidates(vec![])?;
-                    ipc_service.flush_learning()?;
                     ipc_service.clear_text()?;
                 }
                 ClientAction::AppendText(text) => {

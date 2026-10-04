@@ -273,36 +273,36 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
 @_silgen_name("AppendText")
 @MainActor public func append_text(
     input: UnsafePointer<CChar>,
-    cursorPtr: UnsafeMutablePointer<Int>
+    cursorPtr: UnsafeMutablePointer<Int32>
 ) -> UnsafeMutablePointer<CChar> {
     clearPostCompositionPredictionState()
     let inputString = String(cString: input)
     composingText.insertAtCursorPosition(inputString, inputStyle: .roman2kana)
 
-    cursorPtr.pointee = composingText.convertTargetCursorPosition    
+    cursorPtr.pointee = Int32(composingText.convertTargetCursorPosition)    
     return _strdup(composingText.convertTarget)!
 }
 
 @_silgen_name("RemoveText")
 @MainActor public func remove_text(
-    cursorPtr: UnsafeMutablePointer<Int>
+    cursorPtr: UnsafeMutablePointer<Int32>
 ) -> UnsafeMutablePointer<CChar> {
     composingText.deleteBackwardFromCursorPosition(count: 1)
 
-    cursorPtr.pointee = composingText.convertTargetCursorPosition
+    cursorPtr.pointee = Int32(composingText.convertTargetCursorPosition)
     return _strdup(composingText.convertTarget)!
 }
 
 @_silgen_name("MoveCursor")
 @MainActor public func move_cursor(
     offset: Int32,
-    cursorPtr: UnsafeMutablePointer<Int>
+    cursorPtr: UnsafeMutablePointer<Int32>
 ) -> UnsafeMutablePointer<CChar> {
     let previousCursor = composingText.convertTargetCursorPosition
     let cursor = composingText.moveCursorFromCursorPosition(count: Int(offset))
     print("offset: \(offset), cursor: \(cursor)")
 
-    cursorPtr.pointee = cursor
+    cursorPtr.pointee = Int32(cursor)
     return _strdup(composingText.convertTarget)!
 }
 
@@ -348,7 +348,7 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
 
 @_silgen_name("GetPostCompositionPredictions")
 @MainActor public func get_post_composition_predictions(
-    lengthPtr: UnsafeMutablePointer<Int>
+    lengthPtr: UnsafeMutablePointer<Int32>
 ) -> UnsafeMutablePointer<UnsafeMutablePointer<FFICandidate>?> {
     var result: [FFICandidate] = []
     for (index, prediction) in lastPredictionCandidates.enumerated() {
@@ -360,7 +360,7 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
             candidateIndex: Int32(index)
         ))
     }
-    lengthPtr.pointee = result.count
+    lengthPtr.pointee = Int32(result.count)
     return to_list_pointer(result)
 }
 
@@ -399,7 +399,7 @@ func to_list_pointer(_ list: [FFICandidate]) -> UnsafeMutablePointer<UnsafeMutab
 }
 
 @_silgen_name("GetComposedText")
-@MainActor public func get_composed_text(lengthPtr: UnsafeMutablePointer<Int>) -> UnsafeMutablePointer<UnsafeMutablePointer<FFICandidate>?> {
+@MainActor public func get_composed_text(lengthPtr: UnsafeMutablePointer<Int32>) -> UnsafeMutablePointer<UnsafeMutablePointer<FFICandidate>?> {
     let hiragana = composingText.convertTarget
     let contextString = (config["context"] as? String) ?? ""
     let options = getOptions(context: contextString)
@@ -427,7 +427,7 @@ func to_list_pointer(_ list: [FFICandidate]) -> UnsafeMutablePointer<UnsafeMutab
         ))        
     }
 
-    lengthPtr.pointee = result.count
+    lengthPtr.pointee = Int32(result.count)
 
     return to_list_pointer(result)
 }

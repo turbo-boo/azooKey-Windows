@@ -20,7 +20,7 @@ const USE_ZENZAI: bool = true;
 
 struct RawComposingText {
     text: String,
-    cursor: i8,
+    cursor: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -69,7 +69,7 @@ fn add_text(input: &str) -> RawComposingText {
 
         RawComposingText {
             text: text.to_string(),
-            cursor: cursor as i8,
+            cursor,
         }
     }
 }
@@ -86,7 +86,7 @@ fn move_cursor(offset: i8) -> RawComposingText {
 
         RawComposingText {
             text: text.to_string(),
-            cursor: cursor as i8,
+            cursor,
         }
     }
 }
@@ -101,7 +101,7 @@ fn remove_text() -> RawComposingText {
 
         RawComposingText {
             text: text.to_string(),
-            cursor: cursor as i8,
+            cursor,
         }
     }
 }

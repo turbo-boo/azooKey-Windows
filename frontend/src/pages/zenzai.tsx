@@ -1,6 +1,9 @@
 import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { open } from "@tauri-apps/plugin-dialog";
 import { Switch } from "@/components/ui/switch";
-import { Bot, User, Cpu } from "lucide-react";
+import { Bot, User, Cpu, BrainCircuit, FolderOpen } from "lucide-react";
 import {
     Select,
     SelectContent,
@@ -58,6 +61,12 @@ export const Zenzai = () => {
         vulkan: false,
     });
 
+    const [personalization, setPersonalization] = useState({
+        enabled: false,
+        tuner_directory: "",
+        alpha: 0.5,
+    });
+
     // Load config on component mount
     useEffect(() => {
         invoke<any>("get_config")
@@ -67,6 +76,11 @@ export const Zenzai = () => {
                     enable: zenzai.enable,
                     profile: zenzai.profile,
                     backend: zenzai.backend,
+                });
+                setPersonalization({
+                    enabled: data.personalization?.enabled ?? false,
+                    tuner_directory: data.personalization?.tuner_directory ?? "",
+                    alpha: data.personalization?.alpha ?? 0.5,
                 });
             })
             .catch(() => {
@@ -110,6 +124,52 @@ export const Zenzai = () => {
         
         updateConfig((data) => {
             data.zenzai.profile = newProfile;
+        });
+    };
+
+    const chooseTunerDirectory = async () => {
+        const path = await open({ directory: true, multiple: false });
+        if (typeof path !== "string") return;
+
+        try {
+            await invoke("validate_tuner_model", { path });
+            const data = await updateConfig((data) => {
+                data.personalization.tuner_directory = path;
+            });
+            if (data) {
+                setPersonalization((prev) => ({ ...prev, tuner_directory: path }));
+                toast("Tunerモデルを確認しました");
+            }
+        } catch (error) {
+            toast("Tunerモデルを利用できません", { description: String(error) });
+        }
+    };
+
+    const setPersonalizationEnabled = async (enabled: boolean) => {
+        if (enabled && !personalization.tuner_directory) {
+            toast("先にTunerモデルのフォルダーを指定してください");
+            return;
+        }
+        if (enabled) {
+            try {
+                await invoke("validate_tuner_model", { path: personalization.tuner_directory });
+            } catch (error) {
+                toast("Tunerモデルを利用できません", { description: String(error) });
+                return;
+            }
+        }
+
+        const data = await updateConfig((data) => {
+            data.personalization.enabled = enabled;
+        });
+        if (data) setPersonalization((prev) => ({ ...prev, enabled }));
+    };
+
+    const setPersonalizationAlpha = async (alpha: number) => {
+        const normalized = Math.min(1, Math.max(0, alpha));
+        setPersonalization((prev) => ({ ...prev, alpha: normalized }));
+        await updateConfig((data) => {
+            data.personalization.alpha = normalized;
         });
     };
 
@@ -157,6 +217,49 @@ export const Zenzai = () => {
                     </div>
                     <Textarea placeholder="例）山田太郎、数学科の学生。" value={value.profile} disabled={!value.enable} onChange={handleProfileChange} />
                 </div>
+                <div className="space-y-4 rounded-md border p-4">
+                    <div className="flex items-center gap-4">
+                        <BrainCircuit />
+                        <div className="flex-1">
+                            <p className="text-sm font-medium">個人最適化システム</p>
+                            <p className="text-xs text-muted-foreground">
+                                Tunerが生成した original_*.marisa と lm_*.marisa をZenzaiに読み込みます
+                            </p>
+                        </div>
+                        <Switch
+                            checked={personalization.enabled}
+                            onCheckedChange={setPersonalizationEnabled}
+                            disabled={!value.enable}
+                        />
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <Input
+                            value={personalization.tuner_directory}
+                            readOnly
+                            placeholder="Tunerのp13n_v1/lmフォルダー"
+                            className="flex-1"
+                        />
+                        <Button type="button" variant="secondary" onClick={chooseTunerDirectory}>
+                            <FolderOpen />
+                            選択
+                        </Button>
+                    </div>
+                    <div className="flex items-center gap-4">
+                        <span className="text-xs text-muted-foreground">適用強度</span>
+                        <input
+                            type="range"
+                            min="0"
+                            max="1"
+                            step="0.05"
+                            value={personalization.alpha}
+                            onChange={(event) => setPersonalizationAlpha(Number(event.target.value))}
+                            disabled={!personalization.enabled}
+                            className="flex-1"
+                        />
+                        <span className="w-10 text-right text-xs">{personalization.alpha.toFixed(2)}</span>
+                    </div>
+                </div>
+
                 <div className="flex items-center space-x-4 rounded-md border p-4">
                     <Cpu />
                     <div className="flex-1 space-y-1">

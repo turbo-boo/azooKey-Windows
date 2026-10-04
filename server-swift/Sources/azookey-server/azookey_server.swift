@@ -13,6 +13,10 @@ import ffi
     "enable": false,
     "profile": "",
     "learningMode": "inputAndOutput",
+    "personalizationEnabled": false,
+    "personalizationDirectory": "",
+    "personalizationAlpha": 0.5,
+    "predictionEnabled": true,
 ]
 
 @MainActor func getLearningType() -> LearningType {
@@ -26,12 +30,51 @@ import ffi
     }
 }
 
+@MainActor func getPersonalizationMode() -> ConvertRequestOptions.ZenzaiMode.PersonalizationMode? {
+    guard config["personalizationEnabled"] as? Bool == true,
+          let directory = config["personalizationDirectory"] as? String,
+          !directory.isEmpty else {
+        return nil
+    }
+
+    let requiredSuffixes = [
+        "_c_abc.marisa",
+        "_r_xbx.marisa",
+        "_u_abx.marisa",
+        "_u_xbc.marisa",
+    ]
+    let directoryURL = URL(filePath: directory, directoryHint: .isDirectory)
+    for prefix in ["original", "lm"] {
+        for suffix in requiredSuffixes {
+            let path = directoryURL.appendingPathComponent(prefix + suffix).path
+            guard FileManager.default.fileExists(atPath: path) else {
+                print("Personalization model missing: \(path)")
+                return nil
+            }
+        }
+    }
+
+    let alphaValue = config["personalizationAlpha"]
+    let alpha: Float
+    if let number = alphaValue as? NSNumber {
+        alpha = min(1, max(0, number.floatValue))
+    } else {
+        alpha = 0.5
+    }
+
+    return .init(
+        baseNgramLanguageModel: directoryURL.appendingPathComponent("original").path,
+        personalNgramLanguageModel: directoryURL.appendingPathComponent("lm").path,
+        alpha: alpha
+    )
+}
+
 @MainActor func getOptions(
     context: String = "",
     shouldResetMemory: Bool = false
 ) -> ConvertRequestOptions {
     return ConvertRequestOptions(
-        requireJapanesePrediction: true,
+        requireJapanesePrediction: (config["predictionEnabled"] as? Bool) ?? true,
         requireEnglishPrediction: false,
         keyboardLanguage: .ja_JP,
         learningType: getLearningType(),
@@ -47,7 +90,7 @@ import ffi
             weight: execURL.appendingPathComponent("zenz.gguf"),
             inferenceLimit: 1,
             requestRichCandidates: true,
-            personalizationMode: nil,
+            personalizationMode: getPersonalizationMode(),
             versionDependentMode: .v3(
                 .init(
                     profile: config["profile"] as! String,
@@ -148,6 +191,16 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
                 if let learningDict = json["learning"] as? [String: Any],
                    let mode = learningDict["mode"] as? String {
                     config["learningMode"] = mode
+                }
+
+                if let personalization = json["personalization"] as? [String: Any] {
+                    config["personalizationEnabled"] = personalization["enabled"] as? Bool ?? false
+                    config["personalizationDirectory"] = personalization["tuner_directory"] as? String ?? ""
+                    config["personalizationAlpha"] = personalization["alpha"] as? NSNumber ?? 0.5
+                }
+
+                if let prediction = json["prediction"] as? [String: Any] {
+                    config["predictionEnabled"] = prediction["enabled"] as? Bool ?? true
                 }
 
                 applyUserDictionary(json)

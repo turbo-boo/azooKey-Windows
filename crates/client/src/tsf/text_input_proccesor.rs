@@ -121,6 +121,11 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
             // end composition
             self.end_composition()?;
 
+            // persist learning memory when the text service is deactivated
+            if let Some(mut ipc_service) = IMEState::get()?.ipc_service.clone() {
+                ipc_service.flush_learning()?;
+            }
+
             // remove key event sink
             tracing::debug!("UnadviseKeyEventSink");
             unsafe {

@@ -39,6 +39,11 @@ fn update_config(state: tauri::State<AppState>, new_config: AppConfig) {
     state.ipc.clone().update_config().unwrap();
 }
 
+#[tauri::command]
+fn reset_learning(state: tauri::State<AppState>) {
+    state.ipc.clone().reset_learning().unwrap();
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct Capability {
     cpu: bool,
@@ -98,6 +103,7 @@ pub fn run() {
             greet,
             get_config,
             update_config,
+            reset_learning,
             check_capability
         ])
         .run(tauri::generate_context!())

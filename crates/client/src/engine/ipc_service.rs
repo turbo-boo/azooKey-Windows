@@ -20,6 +20,12 @@ pub struct IPCService {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct PredictionCandidates {
+    pub texts: Vec<String>,
+    pub prediction_ids: Vec<i32>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct Candidates {
     pub texts: Vec<String>,
     pub sub_texts: Vec<String>,
@@ -193,6 +199,43 @@ impl IPCService {
             .clone()
             .block_on(self.azookey_client.flush_learning(request))?;
 
+        Ok(())
+    }
+
+    #[tracing::instrument]
+    pub fn get_post_composition_predictions(&mut self) -> anyhow::Result<PredictionCandidates> {
+        let request = tonic::Request::new(shared::proto::GetPostCompositionPredictionsRequest {});
+        let response = self
+            .runtime
+            .clone()
+            .block_on(self.azookey_client.get_post_composition_predictions(request))?
+            .into_inner();
+        Ok(PredictionCandidates {
+            texts: response.suggestions.iter().map(|item| item.text.clone()).collect(),
+            prediction_ids: response.suggestions.iter().map(|item| item.prediction_id).collect(),
+        })
+    }
+
+    #[tracing::instrument]
+    pub fn commit_prediction(&mut self, prediction_id: i32) -> anyhow::Result<PredictionCandidates> {
+        let request = tonic::Request::new(shared::proto::CommitPredictionRequest { prediction_id });
+        let response = self
+            .runtime
+            .clone()
+            .block_on(self.azookey_client.commit_prediction(request))?
+            .into_inner();
+        Ok(PredictionCandidates {
+            texts: response.suggestions.iter().map(|item| item.text.clone()).collect(),
+            prediction_ids: response.suggestions.iter().map(|item| item.prediction_id).collect(),
+        })
+    }
+
+    #[tracing::instrument]
+    pub fn clear_post_composition_predictions(&mut self) -> anyhow::Result<()> {
+        let request = tonic::Request::new(shared::proto::ClearPostCompositionPredictionsRequest {});
+        self.runtime
+            .clone()
+            .block_on(self.azookey_client.clear_post_composition_predictions(request))?;
         Ok(())
     }
 

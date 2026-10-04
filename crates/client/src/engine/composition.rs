@@ -142,10 +142,21 @@ impl TextServiceFactory {
                 }
                 UserAction::Enter => {
                     if composition.suffix.is_empty() {
-                        (
-                            CompositionState::None,
-                            vec![ClientAction::CommitCandidate, ClientAction::EndComposition],
-                        )
+                        if composition.should_learn_candidate {
+                            (
+                                CompositionState::Selecting,
+                                vec![
+                                    ClientAction::CommitCandidate,
+                                    ClientAction::EndComposition,
+                                    ClientAction::LoadPredictions,
+                                ],
+                            )
+                        } else {
+                            (
+                                CompositionState::None,
+                                vec![ClientAction::CommitCandidate, ClientAction::EndComposition],
+                            )
+                        }
                     } else {
                         (
                             CompositionState::Composing,
@@ -246,10 +257,21 @@ impl TextServiceFactory {
                 }
                 UserAction::Enter => {
                     if composition.suffix.is_empty() {
-                        (
-                            CompositionState::None,
-                            vec![ClientAction::CommitCandidate, ClientAction::EndComposition],
-                        )
+                        if composition.should_learn_candidate {
+                            (
+                                CompositionState::Selecting,
+                                vec![
+                                    ClientAction::CommitCandidate,
+                                    ClientAction::EndComposition,
+                                    ClientAction::LoadPredictions,
+                                ],
+                            )
+                        } else {
+                            (
+                                CompositionState::None,
+                                vec![ClientAction::CommitCandidate, ClientAction::EndComposition],
+                            )
+                        }
                     } else {
                         (
                             CompositionState::Composing,
@@ -323,9 +345,57 @@ impl TextServiceFactory {
                     return Ok(None);
                 }
             },
-            _ => {
-                return Ok(None);
-            }
+            CompositionState::Selecting => match action {
+                UserAction::Input(char) if mode == InputMode::Kana => (
+                    CompositionState::Composing,
+                    vec![
+                        ClientAction::DismissPredictions,
+                        ClientAction::StartComposition,
+                        ClientAction::AppendText(char.to_string()),
+                    ],
+                ),
+                UserAction::Number(number) if mode == InputMode::Kana => (
+                    CompositionState::Composing,
+                    vec![
+                        ClientAction::DismissPredictions,
+                        ClientAction::StartComposition,
+                        ClientAction::AppendText(number.to_string()),
+                    ],
+                ),
+                UserAction::Enter => (
+                    CompositionState::Selecting,
+                    vec![ClientAction::AcceptPrediction],
+                ),
+                UserAction::Space | UserAction::Tab => (
+                    CompositionState::Selecting,
+                    vec![ClientAction::SetSelection(SetSelectionType::Down)],
+                ),
+                UserAction::Navigation(Navigation::Up) => (
+                    CompositionState::Selecting,
+                    vec![ClientAction::SetSelection(SetSelectionType::Up)],
+                ),
+                UserAction::Navigation(Navigation::Down) => (
+                    CompositionState::Selecting,
+                    vec![ClientAction::SetSelection(SetSelectionType::Down)],
+                ),
+                UserAction::Escape | UserAction::Backspace => (
+                    CompositionState::None,
+                    vec![ClientAction::DismissPredictions],
+                ),
+                UserAction::ToggleInputMode => (
+                    CompositionState::None,
+                    vec![
+                        ClientAction::DismissPredictions,
+                        ClientAction::SetIMEMode(match mode {
+                            InputMode::Kana => InputMode::Latin,
+                            InputMode::Latin => InputMode::Kana,
+                        }),
+                    ],
+                ),
+                _ => {
+                    return Ok(None);
+                }
+            },
         };
 
         Ok(Some((actions, transition)))
@@ -433,6 +503,92 @@ impl TextServiceFactory {
                     }
                     should_learn_candidate = false;
                 }
+                ClientAction::LoadPredictions => {
+                    let predictions = ipc_service.get_post_composition_predictions()?;
+                    if predictions.texts.is_empty() {
+                        candidates = Candidates::default();
+                        transition = CompositionState::None;
+                        ipc_service.hide_window()?;
+                        ipc_service.set_candidates(vec![])?;
+                    } else {
+                        candidates = Candidates {
+                            texts: predictions.texts.clone(),
+                            sub_texts: vec![String::new(); predictions.texts.len()],
+                            hiragana: String::new(),
+                            corresponding_count: vec![0; predictions.texts.len()],
+                            candidate_ids: predictions.prediction_ids,
+                        };
+                        selection_index = 0;
+                        preview.clear();
+                        suffix.clear();
+                        raw_input.clear();
+                        raw_hiragana.clear();
+                        corresponding_count = 0;
+                        should_learn_candidate = false;
+                        ipc_service.set_candidates(candidates.texts.clone())?;
+                        ipc_service.set_selection(0)?;
+                        ipc_service.show_window()?;
+                        transition = CompositionState::Selecting;
+                    }
+                }
+                ClientAction::AcceptPrediction => {
+                    let Some(text) = candidates.texts.get(selection_index as usize).cloned() else {
+                        transition = CompositionState::None;
+                        ipc_service.hide_window()?;
+                        continue;
+                    };
+                    let Some(prediction_id) = candidates.candidate_ids.get(selection_index as usize).copied() else {
+                        transition = CompositionState::None;
+                        ipc_service.hide_window()?;
+                        continue;
+                    };
+
+                    self.start_composition()?;
+                    self.set_text(&text, "")?;
+                    self.update_pos()?;
+                    self.end_composition()?;
+
+                    let predictions = ipc_service.commit_prediction(prediction_id)?;
+                    if predictions.texts.is_empty() {
+                        candidates = Candidates::default();
+                        selection_index = 0;
+                        ipc_service.hide_window()?;
+                        ipc_service.set_candidates(vec![])?;
+                        transition = CompositionState::None;
+                    } else {
+                        candidates = Candidates {
+                            texts: predictions.texts.clone(),
+                            sub_texts: vec![String::new(); predictions.texts.len()],
+                            hiragana: String::new(),
+                            corresponding_count: vec![0; predictions.texts.len()],
+                            candidate_ids: predictions.prediction_ids,
+                        };
+                        selection_index = 0;
+                        ipc_service.set_candidates(candidates.texts.clone())?;
+                        ipc_service.set_selection(0)?;
+                        ipc_service.show_window()?;
+                        transition = CompositionState::Selecting;
+                    }
+                    preview.clear();
+                    suffix.clear();
+                    raw_input.clear();
+                    raw_hiragana.clear();
+                    corresponding_count = 0;
+                    should_learn_candidate = false;
+                }
+                ClientAction::DismissPredictions => {
+                    ipc_service.clear_post_composition_predictions()?;
+                    candidates = Candidates::default();
+                    selection_index = 0;
+                    preview.clear();
+                    suffix.clear();
+                    raw_input.clear();
+                    raw_hiragana.clear();
+                    corresponding_count = 0;
+                    should_learn_candidate = false;
+                    ipc_service.hide_window()?;
+                    ipc_service.set_candidates(vec![])?;
+                }
                 ClientAction::MagicConvert => {
                     let source = if preview.is_empty() {
                         raw_hiragana.clone()
@@ -447,7 +603,7 @@ impl TextServiceFactory {
                             sub_texts: vec![String::new(); converted.len()],
                             hiragana: raw_hiragana.clone(),
                             corresponding_count: vec![count; converted.len()],
-                            candidate_ids: vec![-1; converted.len()],
+                            candidate_ids: vec![],
                         };
                         selection_index = 0;
                         corresponding_count = count;
@@ -542,18 +698,20 @@ impl TextServiceFactory {
                     };
 
                     ipc_service.set_selection(selection_index as i32)?;
-                    let text = texts[selection_index as usize].clone();
-                    let sub_text = sub_texts[selection_index as usize].clone();
-                    let hiragana = candidates.hiragana.clone();
-                    corresponding_count = candidates.corresponding_count[selection_index as usize];
+                    if composition.state != CompositionState::Selecting {
+                        let text = texts[selection_index as usize].clone();
+                        let sub_text = sub_texts[selection_index as usize].clone();
+                        let hiragana = candidates.hiragana.clone();
+                        corresponding_count = candidates.corresponding_count[selection_index as usize];
 
-                    preview = text.clone();
-                    suffix = sub_text.clone();
-                    raw_hiragana = hiragana.clone();
-                    should_learn_candidate =
-                        candidates.candidate_ids.get(selection_index as usize).is_some();
+                        preview = text.clone();
+                        suffix = sub_text.clone();
+                        raw_hiragana = hiragana.clone();
+                        should_learn_candidate =
+                            candidates.candidate_ids.get(selection_index as usize).is_some();
 
-                    self.set_text(&text, &sub_text)?;
+                        self.set_text(&text, &sub_text)?;
+                    }
                 }
                 ClientAction::ShrinkText(text) => {
                     // shrink text

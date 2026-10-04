@@ -9,6 +9,8 @@ import ffi
 @MainActor var appDataURL = URL(filePath: "")
 @MainActor var learningMemoryURL = URL(filePath: "")
 @MainActor var lastCandidates: [Candidate] = []
+@MainActor var lastCommittedCandidate: Candidate?
+@MainActor var lastPredictionCandidates: [PostCompositionPredictionCandidate] = []
 @MainActor var config: [String : Any] = [
     "enable": false,
     "profile": "",
@@ -16,7 +18,8 @@ import ffi
     "personalizationEnabled": false,
     "personalizationDirectory": "",
     "personalizationAlpha": 0.5,
-    "predictionEnabled": true,
+    "predictionEnabled": false,
+    "predictionMaxCandidates": 5,
 ]
 
 @MainActor func getLearningType() -> LearningType {
@@ -43,7 +46,7 @@ import ffi
         "_u_abx.marisa",
         "_u_xbc.marisa",
     ]
-    let directoryURL = URL(filePath: directory, directoryHint: .isDirectory)
+    let directoryURL = URL(filePath: directory)
     for prefix in ["original", "lm"] {
         for suffix in requiredSuffixes {
             let path = directoryURL.appendingPathComponent(prefix + suffix).path
@@ -74,7 +77,7 @@ import ffi
     shouldResetMemory: Bool = false
 ) -> ConvertRequestOptions {
     return ConvertRequestOptions(
-        requireJapanesePrediction: (config["predictionEnabled"] as? Bool) ?? true,
+        requireJapanesePrediction: true,
         requireEnglishPrediction: false,
         keyboardLanguage: .ja_JP,
         learningType: getLearningType(),
@@ -200,7 +203,8 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
                 }
 
                 if let prediction = json["prediction"] as? [String: Any] {
-                    config["predictionEnabled"] = prediction["enabled"] as? Bool ?? true
+                    config["predictionEnabled"] = prediction["enabled"] as? Bool ?? false
+                    config["predictionMaxCandidates"] = prediction["max_candidates"] as? NSNumber ?? 5
                 }
 
                 applyUserDictionary(json)
@@ -242,11 +246,36 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
     composingText = ComposingText()
 }
 
+@MainActor func predictionLimit() -> Int {
+    let raw = (config["predictionMaxCandidates"] as? NSNumber)?.intValue ?? 5
+    return min(10, max(1, raw))
+}
+
+@MainActor func clearPostCompositionPredictionState() {
+    lastCommittedCandidate = nil
+    lastPredictionCandidates = []
+}
+
+@MainActor func updatePostCompositionPredictions(candidate: Candidate) {
+    guard config["predictionEnabled"] as? Bool == true else {
+        clearPostCompositionPredictionState()
+        return
+    }
+
+    lastCommittedCandidate = candidate
+    let predictions = converter.requestPostCompositionPredictionCandidates(
+        leftSideCandidate: candidate,
+        options: getOptions()
+    )
+    lastPredictionCandidates = Array(predictions.prefix(predictionLimit()))
+}
+
 @_silgen_name("AppendText")
 @MainActor public func append_text(
     input: UnsafePointer<CChar>,
     cursorPtr: UnsafeMutablePointer<Int>
 ) -> UnsafeMutablePointer<CChar> {
+    clearPostCompositionPredictionState()
     let inputString = String(cString: input)
     composingText.insertAtCursorPosition(inputString, inputStyle: .roman2kana)
 
@@ -298,7 +327,9 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
     remainingText.prefixComplete(correspondingCount: candidate.correspondingCount)
     if remainingText.convertTarget.isEmpty {
         converter.stopComposition()
+        updatePostCompositionPredictions(candidate: candidate)
     } else {
+        clearPostCompositionPredictionState()
         converter.setCompletedData(candidate)
     }
 }
@@ -313,6 +344,49 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
     converter.sendToDicdataStore(
         .setRequestOptions(getOptions(shouldResetMemory: true))
     )
+}
+
+@_silgen_name("GetPostCompositionPredictions")
+@MainActor public func get_post_composition_predictions(
+    lengthPtr: UnsafeMutablePointer<Int>
+) -> UnsafeMutablePointer<UnsafeMutablePointer<FFICandidate>?> {
+    var result: [FFICandidate] = []
+    for (index, prediction) in lastPredictionCandidates.enumerated() {
+        result.append(FFICandidate(
+            text: strdup(prediction.text),
+            subtext: strdup(""),
+            hiragana: strdup(""),
+            correspondingCount: 0,
+            candidateIndex: Int32(index)
+        ))
+    }
+    lengthPtr.pointee = result.count
+    return to_list_pointer(result)
+}
+
+@_silgen_name("CommitPrediction")
+@MainActor public func commit_prediction(predictionIndex: Int32) {
+    let index = Int(predictionIndex)
+    guard let committedCandidate = lastCommittedCandidate,
+          lastPredictionCandidates.indices.contains(index) else {
+        clearPostCompositionPredictionState()
+        return
+    }
+
+    let prediction = lastPredictionCandidates[index]
+    if prediction.isTerminal {
+        clearPostCompositionPredictionState()
+        return
+    }
+
+    converter.updateLearningData(committedCandidate, with: prediction)
+    let newCandidate = prediction.join(to: committedCandidate)
+    updatePostCompositionPredictions(candidate: newCandidate)
+}
+
+@_silgen_name("ClearPostCompositionPredictions")
+@MainActor public func clear_post_composition_predictions() {
+    clearPostCompositionPredictionState()
 }
 
 func to_list_pointer(_ list: [FFICandidate]) -> UnsafeMutablePointer<UnsafeMutablePointer<FFICandidate>?> {

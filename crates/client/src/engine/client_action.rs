@@ -9,6 +9,9 @@ pub enum ClientAction {
     RemoveText,
     ShrinkText(String),
     CommitCandidate,
+    LoadPredictions,
+    AcceptPrediction,
+    DismissPredictions,
     MagicConvert,
 
     SetTextWithType(SetTextType),

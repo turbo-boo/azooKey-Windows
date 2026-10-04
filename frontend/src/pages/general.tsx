@@ -163,7 +163,7 @@ export const General = () => {
                     <div className="flex-1 space-y-1">
                         <p className="text-sm font-medium leading-none">日本語の予測候補</p>
                         <p className="text-xs text-muted-foreground">
-                            KanaKanjiConverterの予測候補を通常の変換候補へ混ぜます
+                            変換確定後にKanaKanjiConverterの次入力候補を表示します
                         </p>
                     </div>
                     <Switch checked={predictionEnabled} onCheckedChange={updatePrediction} />

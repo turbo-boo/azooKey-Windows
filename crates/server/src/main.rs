@@ -5,8 +5,11 @@ use tonic_reflection::server::Builder as ReflectionBuilder;
 use shared::proto::azookey_service_server::{AzookeyService, AzookeyServiceServer};
 use shared::proto::{
     AppendTextRequest, AppendTextResponse, ClearTextRequest, ClearTextResponse, ComposingText,
-    MagicConvertRequest, MagicConvertResponse, MoveCursorRequest, MoveCursorResponse,
-    RemoveTextRequest, RemoveTextResponse, ShrinkTextRequest, ShrinkTextResponse, Suggestion,
+    ClearPostCompositionPredictionsRequest, ClearPostCompositionPredictionsResponse,
+    CommitPredictionRequest, CommitPredictionResponse, GetPostCompositionPredictionsRequest,
+    GetPostCompositionPredictionsResponse, MagicConvertRequest, MagicConvertResponse,
+    MoveCursorRequest, MoveCursorResponse, PredictionSuggestion, RemoveTextRequest,
+    RemoveTextResponse, ShrinkTextRequest, ShrinkTextResponse, Suggestion,
 };
 use shared::AppConfig;
 
@@ -42,6 +45,9 @@ unsafe extern "C" {
     fn CommitCandidate(candidateIndex: c_int);
     fn FlushLearning();
     fn ResetLearning();
+    fn GetPostCompositionPredictions(lengthPtr: *mut c_int) -> *mut *mut FFICandidate;
+    fn CommitPrediction(predictionIndex: c_int);
+    fn ClearPostCompositionPredictions();
     fn LoadConfig();
 }
 
@@ -141,6 +147,36 @@ fn get_composed_text() -> Vec<Suggestion> {
         }
 
         suggestions
+    }
+}
+
+fn get_post_composition_predictions() -> Vec<PredictionSuggestion> {
+    unsafe {
+        let mut length: c_int = 0;
+        let result = GetPostCompositionPredictions(&mut length);
+        let mut suggestions = Vec::with_capacity(length as usize);
+
+        for index in 0..length as usize {
+            let candidate = (**result.add(index)).clone();
+            suggestions.push(PredictionSuggestion {
+                text: CStr::from_ptr(candidate.text).to_string_lossy().into_owned(),
+                prediction_id: candidate.candidate_index,
+            });
+        }
+        suggestions
+    }
+}
+
+fn commit_prediction(prediction_id: i32) -> Vec<PredictionSuggestion> {
+    unsafe {
+        CommitPrediction(prediction_id);
+    }
+    get_post_composition_predictions()
+}
+
+fn clear_post_composition_predictions() {
+    unsafe {
+        ClearPostCompositionPredictions();
     }
 }
 
@@ -409,6 +445,32 @@ impl AzookeyService for MyAzookeyService {
             .await
             .map_err(Status::failed_precondition)?;
         Ok(Response::new(MagicConvertResponse { candidates }))
+    }
+
+    async fn get_post_composition_predictions(
+        &self,
+        _: Request<GetPostCompositionPredictionsRequest>,
+    ) -> Result<Response<GetPostCompositionPredictionsResponse>, Status> {
+        Ok(Response::new(GetPostCompositionPredictionsResponse {
+            suggestions: get_post_composition_predictions(),
+        }))
+    }
+
+    async fn commit_prediction(
+        &self,
+        request: Request<CommitPredictionRequest>,
+    ) -> Result<Response<CommitPredictionResponse>, Status> {
+        Ok(Response::new(CommitPredictionResponse {
+            suggestions: commit_prediction(request.into_inner().prediction_id),
+        }))
+    }
+
+    async fn clear_post_composition_predictions(
+        &self,
+        _: Request<ClearPostCompositionPredictionsRequest>,
+    ) -> Result<Response<ClearPostCompositionPredictionsResponse>, Status> {
+        clear_post_composition_predictions();
+        Ok(Response::new(ClearPostCompositionPredictionsResponse {}))
     }
 }
 

@@ -3,6 +3,6 @@
     "zenzai": {
         "enable": false,
         "profile": "",
-        "backend": "cpu"
+        "backend": "vulkan"
     }
 }

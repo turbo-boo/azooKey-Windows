@@ -57,7 +57,7 @@ Zenzai有効時に、Tunerが生成した `p13n_v1` ディレクトリを指定�
 `original_*.marisa` と `lm_*.marisa` の必須モデルを確認してからZenzaiへ読み込みます。
 
 ### バックエンド
-以下の3種類のバックエンドをサポートしています。
+以下の3種類のバックエンドをサポートしています。新規設定ではVulkanを既定にし、Vulkanランタイムを利用できない場合はlauncherがCPUへフォールバックします。
 
 - **CPU**: 動作が非常に遅いため、非推奨です。
 - **CUDA**: NvidiaのGPU専用。[CUDA Toolkit 12系](https://developer.nvidia.com/cuda-downloads)をインストールする必要があります。

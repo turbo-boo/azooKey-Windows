@@ -6,16 +6,33 @@ use std::os::windows::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::{env, thread};
 
+fn file_on_search_path(filename: &str) -> bool {
+    env::var("PATH")
+        .unwrap_or_default()
+        .split(';')
+        .filter(|entry| !entry.is_empty())
+        .map(std::path::PathBuf::from)
+        .any(|path| path.join(filename).is_file())
+}
+
+fn select_backend_dir(configured: &str, cuda_available: bool, vulkan_available: bool) -> &'static str {
+    match configured {
+        "cuda" if cuda_available => "llama_cuda",
+        "vulkan" if vulkan_available => "llama_vulkan",
+        "cpu" => "llama_cpu",
+        _ => "llama_cpu",
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let config = AppConfig::new();
 
     let exe_path = env::current_exe()?.parent().unwrap().to_path_buf();
-    let backend_dir = match config.zenzai.backend.as_str() {
-        "cpu" => "llama_cpu",
-        "cuda" => "llama_cuda",
-        "vulkan" => "llama_vulkan",
-        _ => "llama_cpu",
-    };
+    let cuda_available =
+        file_on_search_path("cudart64_12.dll") && file_on_search_path("cublas64_12.dll");
+    let vulkan_available = file_on_search_path("vulkan-1.dll");
+    let backend_dir =
+        select_backend_dir(config.zenzai.backend.as_str(), cuda_available, vulkan_available);
 
     let backend_path = exe_path.join(backend_dir);
     let backend_path_str = backend_path.to_string_lossy();
@@ -73,4 +90,31 @@ fn start_process(base_dir: &std::path::Path, exe: &str, prefix: &str) -> Option<
     });
 
     Some(child)
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::select_backend_dir;
+
+    #[test]
+    fn vulkan_is_used_when_runtime_is_available() {
+        assert_eq!(select_backend_dir("vulkan", false, true), "llama_vulkan");
+    }
+
+    #[test]
+    fn unavailable_accelerated_backend_falls_back_to_cpu() {
+        assert_eq!(select_backend_dir("vulkan", false, false), "llama_cpu");
+        assert_eq!(select_backend_dir("cuda", false, true), "llama_cpu");
+    }
+
+    #[test]
+    fn cuda_is_used_only_when_required_runtime_is_available() {
+        assert_eq!(select_backend_dir("cuda", true, true), "llama_cuda");
+    }
+
+    #[test]
+    fn unknown_backend_falls_back_to_cpu() {
+        assert_eq!(select_backend_dir("unknown", true, true), "llama_cpu");
+    }
 }

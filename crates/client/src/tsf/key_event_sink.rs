@@ -12,7 +12,7 @@ use windows::{
 use crate::{
     engine::{
         client_action::ClientAction,
-        composition::{ctrl_space_shortcut_enabled, CompositionState},
+        composition::{ime_toggle_shortcut_matches, CompositionState},
     },
     extension::VKeyExt as _,
 };
@@ -58,7 +58,7 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
             VK_CONTROL.is_pressed(),
             wparam.0,
             self.has_active_composition()?,
-            ctrl_space_shortcut_enabled(wparam),
+            VK_CONTROL.is_pressed() && ime_toggle_shortcut_matches(wparam, lparam),
         ) {
             return Ok(true.into());
         }
@@ -74,7 +74,7 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
             VK_CONTROL.is_pressed(),
             wparam.0,
             self.has_active_composition()?,
-            ctrl_space_shortcut_enabled(wparam),
+            VK_CONTROL.is_pressed() && ime_toggle_shortcut_matches(wparam, lparam),
         ) {
             if let Some(context) = pic {
                 self.borrow_mut()?.context = Some(context.clone());

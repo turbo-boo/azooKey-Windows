@@ -13,12 +13,13 @@ use super::{
     text_util::{to_half_katakana, to_katakana},
     user_action::{Function, Navigation},
 };
-use shared::AppConfig;
+use shared::{AppConfig, ShortcutBinding};
 use windows::Win32::{
     Foundation::{LPARAM, WPARAM},
     UI::{
         Input::KeyboardAndMouse::{
-            VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_MENU, VK_RCONTROL, VK_RMENU,
+            VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_MENU, VK_RCONTROL, VK_RMENU,
+            VK_RSHIFT, VK_SHIFT,
         },
         TextServices::{ITfComposition, ITfCompositionSink_Impl, ITfContext},
     },
@@ -114,22 +115,66 @@ fn is_ctrl_pressed() -> bool {
     VK_CONTROL.is_pressed() || VK_LCONTROL.is_pressed() || VK_RCONTROL.is_pressed()
 }
 
-fn is_alt_backquote_key(wparam: WPARAM, lparam: LPARAM, alt_pressed: bool) -> bool {
-    const VK_OEM_3: usize = 0xC0;
-    const SCAN_CODE_BACKQUOTE: usize = 0x29;
+fn is_alt_pressed(lparam: LPARAM) -> bool {
     const ALT_CONTEXT_BIT: usize = 0x2000_0000;
-
-    let alt_context = ((lparam.0 as usize) & ALT_CONTEXT_BIT) != 0;
-    let scan_code = ((lparam.0 as usize) >> 16) & 0xFF;
-    let is_backquote = wparam.0 == VK_OEM_3 || scan_code == SCAN_CODE_BACKQUOTE;
-    (alt_pressed || alt_context) && is_backquote
+    VK_MENU.is_pressed()
+        || VK_LMENU.is_pressed()
+        || VK_RMENU.is_pressed()
+        || ((lparam.0 as usize) & ALT_CONTEXT_BIT) != 0
 }
 
-pub(crate) fn ctrl_space_shortcut_enabled(wparam: WPARAM) -> bool {
-    if !is_ctrl_pressed() || wparam.0 != 0x20 {
+fn is_shift_pressed() -> bool {
+    VK_SHIFT.is_pressed() || VK_LSHIFT.is_pressed() || VK_RSHIFT.is_pressed()
+}
+
+fn shortcut_binding_matches_state(
+    binding: &ShortcutBinding,
+    key_code: usize,
+    scan_code: usize,
+    ctrl_pressed: bool,
+    alt_pressed: bool,
+    shift_pressed: bool,
+) -> bool {
+    const VK_OEM_3: usize = 0xC0;
+    const SCAN_CODE_BACKQUOTE: usize = 0x29;
+
+    if !binding.is_valid() {
         return false;
     }
-    AppConfig::read().shortcuts.ctrl_space_toggle
+
+    let binding_key = usize::from(binding.key_code);
+    let key_matches = key_code == binding_key
+        || (binding_key == VK_OEM_3 && scan_code == SCAN_CODE_BACKQUOTE);
+
+    key_matches
+        && binding.ctrl == ctrl_pressed
+        && binding.alt == alt_pressed
+        && binding.shift == shift_pressed
+}
+
+pub(crate) fn ime_toggle_shortcut_matches(wparam: WPARAM, lparam: LPARAM) -> bool {
+    let ctrl_pressed = is_ctrl_pressed();
+    let alt_pressed = is_alt_pressed(lparam);
+    let shift_pressed = is_shift_pressed();
+    if !ctrl_pressed && !alt_pressed && !shift_pressed {
+        return false;
+    }
+
+    let scan_code = ((lparam.0 as usize) >> 16) & 0xFF;
+    AppConfig::read()
+        .shortcuts
+        .effective_toggle_bindings()
+        .iter()
+        .any(|binding| {
+            shortcut_binding_matches_state(
+                binding,
+                wparam.0,
+                scan_code,
+                ctrl_pressed,
+                alt_pressed,
+                shift_pressed,
+            )
+        })
 }
 
 impl TextServiceFactory {
@@ -154,23 +199,11 @@ impl TextServiceFactory {
         };
 
         let ctrl_pressed = is_ctrl_pressed();
-        let ctrl_space = ctrl_pressed && wparam.0 == 0x20;
-        let alt_pressed = VK_MENU.is_pressed() || VK_LMENU.is_pressed() || VK_RMENU.is_pressed();
-        let alt_backquote = !ctrl_pressed && is_alt_backquote_key(wparam, lparam, alt_pressed);
-
-        if ctrl_space || alt_backquote {
-            let shortcuts = AppConfig::read().shortcuts;
-            if ctrl_space && !shortcuts.ctrl_space_toggle {
-                return Ok(None);
-            }
-            if alt_backquote && !shortcuts.alt_backquote_toggle {
-                return Ok(None);
-            }
-        }
+        let shortcut_toggle = ime_toggle_shortcut_matches(wparam, lparam);
 
         // Other Ctrl shortcuts are passed back to the application. key_event_sink
         // cancels an active composition first.
-        if ctrl_pressed && !ctrl_space {
+        if ctrl_pressed && !shortcut_toggle {
             return Ok(None);
         }
 
@@ -182,7 +215,7 @@ impl TextServiceFactory {
             (composition, mode)
         };
 
-        let action = if ctrl_space || alt_backquote {
+        let action = if shortcut_toggle {
             UserAction::ToggleInputMode
         } else {
             UserAction::try_from(wparam.0)?
@@ -1052,14 +1085,14 @@ impl TextServiceFactory {
 #[cfg(test)]
 mod tests {
     use super::{
-        candidate_is_learnable, candidate_parts, conversion_key_action, is_alt_backquote_key,
-        next_selection_index,
+        candidate_is_learnable, candidate_parts, conversion_key_action, next_selection_index,
+        shortcut_binding_matches_state,
     };
     use crate::engine::{
         client_action::{ClientAction, SetSelectionType},
         ipc_service::Candidates,
     };
-    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use shared::ShortcutBinding;
 
     #[test]
     fn first_conversion_key_requests_candidates_when_live_conversion_is_off() {
@@ -1074,17 +1107,62 @@ mod tests {
     }
 
     #[test]
-    fn alt_backquote_accepts_vk_or_scan_code_with_alt_context() {
-        const ALT_CONTEXT: isize = 0x2000_0000;
-        const BACKQUOTE_SCAN: isize = 0x29 << 16;
-
-        assert!(is_alt_backquote_key(WPARAM(0xC0), LPARAM(ALT_CONTEXT), false));
-        assert!(is_alt_backquote_key(
-            WPARAM(0),
-            LPARAM(ALT_CONTEXT | BACKQUOTE_SCAN),
+    fn configurable_shortcut_matching_requires_exact_modifiers() {
+        let ctrl_k = ShortcutBinding {
+            key_code: b'K' as u16,
+            ctrl: true,
+            alt: false,
+            shift: false,
+        };
+        assert!(shortcut_binding_matches_state(
+            &ctrl_k,
+            b'K' as usize,
+            0,
+            true,
             false,
+            false
         ));
-        assert!(!is_alt_backquote_key(WPARAM(0xC0), LPARAM(0), false));
+        assert!(!shortcut_binding_matches_state(
+            &ctrl_k,
+            b'K' as usize,
+            0,
+            true,
+            false,
+            true
+        ));
+
+        let shift_space = ShortcutBinding {
+            key_code: 0x20,
+            ctrl: false,
+            alt: false,
+            shift: true,
+        };
+        assert!(shortcut_binding_matches_state(
+            &shift_space,
+            0x20,
+            0,
+            false,
+            false,
+            true
+        ));
+    }
+
+    #[test]
+    fn alt_backquote_binding_accepts_physical_scan_code() {
+        let binding = ShortcutBinding {
+            key_code: 0xC0,
+            ctrl: false,
+            alt: true,
+            shift: false,
+        };
+        assert!(shortcut_binding_matches_state(
+            &binding,
+            0,
+            0x29,
+            false,
+            true,
+            false
+        ));
     }
 
     #[test]

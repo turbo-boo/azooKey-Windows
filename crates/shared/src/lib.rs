@@ -25,16 +25,74 @@ pub struct ZenzaiConfig {
     pub backend: String,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+pub struct ShortcutBinding {
+    pub key_code: u16,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+}
+
+impl ShortcutBinding {
+    pub fn is_valid(&self) -> bool {
+        self.key_code > 0 && self.key_code <= 0xFF && (self.ctrl || self.alt || self.shift)
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShortcutConfig {
+    // Legacy switches are kept for settings.json compatibility. When
+    // toggle_bindings is present, it is authoritative.
     #[serde(default = "default_shortcut_enabled")]
     pub ctrl_space_toggle: bool,
     #[serde(default = "default_shortcut_enabled")]
     pub alt_backquote_toggle: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toggle_bindings: Option<Vec<ShortcutBinding>>,
 }
 
 fn default_shortcut_enabled() -> bool {
     true
+}
+
+fn default_toggle_bindings() -> Vec<ShortcutBinding> {
+    vec![
+        ShortcutBinding {
+            key_code: 0x20,
+            ctrl: true,
+            alt: false,
+            shift: false,
+        },
+        ShortcutBinding {
+            key_code: 0xC0,
+            ctrl: false,
+            alt: true,
+            shift: false,
+        },
+    ]
+}
+
+impl ShortcutConfig {
+    pub fn effective_toggle_bindings(&self) -> Vec<ShortcutBinding> {
+        if let Some(bindings) = &self.toggle_bindings {
+            return bindings
+                .iter()
+                .filter(|binding| binding.is_valid())
+                .take(2)
+                .cloned()
+                .collect();
+        }
+
+        let defaults = default_toggle_bindings();
+        let mut bindings = Vec::with_capacity(2);
+        if self.ctrl_space_toggle {
+            bindings.push(defaults[0].clone());
+        }
+        if self.alt_backquote_toggle {
+            bindings.push(defaults[1].clone());
+        }
+        bindings
+    }
 }
 
 impl Default for ShortcutConfig {
@@ -42,6 +100,7 @@ impl Default for ShortcutConfig {
         Self {
             ctrl_space_toggle: true,
             alt_backquote_toggle: true,
+            toggle_bindings: Some(default_toggle_bindings()),
         }
     }
 }
@@ -535,6 +594,10 @@ mod tests {
         assert_eq!(config.learning.mode, "inputAndOutput");
         assert!(config.shortcuts.ctrl_space_toggle);
         assert!(config.shortcuts.alt_backquote_toggle);
+        assert_eq!(
+            config.shortcuts.effective_toggle_bindings(),
+            default_toggle_bindings()
+        );
         assert_eq!(config.theme.mode, "system");
         assert!(!config.personalization.enabled);
         assert!(config.live_conversion.enabled);
@@ -562,12 +625,67 @@ mod tests {
         assert_eq!(config.theme.text_color, "");
         assert!(!config.shortcuts.ctrl_space_toggle);
         assert!(config.shortcuts.alt_backquote_toggle);
+        assert_eq!(
+            config.shortcuts.effective_toggle_bindings(),
+            vec![default_toggle_bindings()[1].clone()]
+        );
         assert!(config.live_conversion.enabled);
         assert!(config.prediction.enabled);
         assert_eq!(config.prediction.max_candidates, 5);
         assert!(config.magic_conversion.enabled);
         assert_eq!(config.magic_conversion.model, "gpt-4o-mini");
         assert_eq!(config.magic_conversion.timeout_seconds, 10);
+    }
+
+    #[test]
+    fn configured_shortcuts_override_legacy_switches_and_allow_disabling_all() {
+        let config = ShortcutConfig {
+            ctrl_space_toggle: true,
+            alt_backquote_toggle: true,
+            toggle_bindings: Some(vec![ShortcutBinding {
+                key_code: b'K' as u16,
+                ctrl: true,
+                alt: false,
+                shift: true,
+            }]),
+        };
+        assert_eq!(
+            config.effective_toggle_bindings(),
+            vec![ShortcutBinding {
+                key_code: b'K' as u16,
+                ctrl: true,
+                alt: false,
+                shift: true,
+            }]
+        );
+
+        let disabled = ShortcutConfig {
+            toggle_bindings: Some(vec![]),
+            ..ShortcutConfig::default()
+        };
+        assert!(disabled.effective_toggle_bindings().is_empty());
+    }
+
+    #[test]
+    fn invalid_shortcut_bindings_are_ignored() {
+        let config = ShortcutConfig {
+            toggle_bindings: Some(vec![
+                ShortcutBinding {
+                    key_code: b'A' as u16,
+                    ctrl: false,
+                    alt: false,
+                    shift: false,
+                },
+                ShortcutBinding {
+                    key_code: 0,
+                    ctrl: true,
+                    alt: false,
+                    shift: false,
+                },
+            ]),
+            ..ShortcutConfig::default()
+        };
+        assert!(config.effective_toggle_bindings().is_empty());
     }
 
     #[test]

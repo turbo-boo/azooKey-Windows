@@ -1,3 +1,8 @@
+use std::{
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
+};
+
 use crate::{
     engine::user_action::UserAction,
     extension::VKeyExt as _,
@@ -13,7 +18,7 @@ use super::{
     text_util::{to_half_katakana, to_katakana},
     user_action::{Function, Navigation},
 };
-use shared::{AppConfig, ShortcutBinding};
+use shared::{AppConfig, ShortcutBinding, ShortcutConfig};
 use windows::Win32::{
     Foundation::{LPARAM, WPARAM},
     UI::{
@@ -152,6 +157,27 @@ fn shortcut_binding_matches_state(
         && binding.shift == shift_pressed
 }
 
+fn shortcut_config() -> ShortcutConfig {
+    struct Cache {
+        value: ShortcutConfig,
+        refreshed_at: Instant,
+    }
+
+    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| {
+        Mutex::new(Cache {
+            value: AppConfig::read().shortcuts,
+            refreshed_at: Instant::now(),
+        })
+    });
+    let mut cache = cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cache.refreshed_at.elapsed() >= Duration::from_millis(250) {
+        cache.value = AppConfig::read().shortcuts;
+        cache.refreshed_at = Instant::now();
+    }
+    cache.value.clone()
+}
+
 pub(crate) fn ime_toggle_shortcut_matches(wparam: WPARAM, lparam: LPARAM) -> bool {
     let ctrl_pressed = is_ctrl_pressed();
     let alt_pressed = is_alt_pressed(lparam);
@@ -161,8 +187,7 @@ pub(crate) fn ime_toggle_shortcut_matches(wparam: WPARAM, lparam: LPARAM) -> boo
     }
 
     let scan_code = ((lparam.0 as usize) >> 16) & 0xFF;
-    AppConfig::read()
-        .shortcuts
+    shortcut_config()
         .effective_toggle_bindings()
         .iter()
         .any(|binding| {

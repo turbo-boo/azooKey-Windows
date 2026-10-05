@@ -10,19 +10,104 @@ import { Brain, ExternalLink, Keyboard, RefreshCcw, Sparkles, Trash2 } from "luc
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type KeyboardEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 
 type LearningMode = "inputAndOutput" | "onlyOutput" | "nothing";
 
+type ShortcutBinding = {
+    key_code: number;
+    ctrl: boolean;
+    alt: boolean;
+    shift: boolean;
+};
+
+const DEFAULT_SHORTCUTS: ShortcutBinding[] = [
+    { key_code: 0x20, ctrl: true, alt: false, shift: false },
+    { key_code: 0xc0, ctrl: false, alt: true, shift: false },
+];
+
+const shortcutKeyName = (keyCode: number) => {
+    if (keyCode >= 0x41 && keyCode <= 0x5a) return String.fromCharCode(keyCode);
+    if (keyCode >= 0x30 && keyCode <= 0x39) return String.fromCharCode(keyCode);
+    if (keyCode >= 0x70 && keyCode <= 0x7b) return `F${keyCode - 0x6f}`;
+
+    const names: Record<number, string> = {
+        0x09: "Tab",
+        0x0d: "Enter",
+        0x20: "Space",
+        0x25: "←",
+        0x26: "↑",
+        0x27: "→",
+        0x28: "↓",
+        0xba: ";",
+        0xbb: "=",
+        0xbc: ",",
+        0xbd: "-",
+        0xbe: ".",
+        0xbf: "/",
+        0xc0: "`",
+        0xdb: "[",
+        0xdc: "\\",
+        0xdd: "]",
+        0xde: "'",
+    };
+    return names[keyCode] ?? `VK 0x${keyCode.toString(16).toUpperCase().padStart(2, "0")}`;
+};
+
+const shortcutLabel = (binding?: ShortcutBinding) => {
+    if (!binding) return "なし（クリックして設定）";
+    return [
+        binding.ctrl ? "Ctrl" : "",
+        binding.alt ? "Alt" : "",
+        binding.shift ? "Shift" : "",
+        shortcutKeyName(binding.key_code),
+    ].filter(Boolean).join(" + ");
+};
+
+const bindingFromKeyboardEvent = (event: KeyboardEvent<HTMLInputElement>): ShortcutBinding | null => {
+    if (event.metaKey) return null;
+    const modifierOnly = [
+        "ControlLeft",
+        "ControlRight",
+        "AltLeft",
+        "AltRight",
+        "ShiftLeft",
+        "ShiftRight",
+        "MetaLeft",
+        "MetaRight",
+    ];
+    if (modifierOnly.includes(event.code)) return null;
+
+    const keyCode = event.keyCode;
+    if (
+        !Number.isInteger(keyCode) ||
+        keyCode <= 0 ||
+        keyCode > 0xff ||
+        (!event.ctrlKey && !event.altKey && !event.shiftKey)
+    ) {
+        return null;
+    }
+
+    return {
+        key_code: keyCode,
+        ctrl: event.ctrlKey,
+        alt: event.altKey,
+        shift: event.shiftKey,
+    };
+};
+
+const sameShortcut = (a: ShortcutBinding, b: ShortcutBinding) =>
+    a.key_code === b.key_code &&
+    a.ctrl === b.ctrl &&
+    a.alt === b.alt &&
+    a.shift === b.shift;
+
 export const General = () => {
     const [learningMode, setLearningMode] = useState<LearningMode>("inputAndOutput");
     const [liveConversionEnabled, setLiveConversionEnabled] = useState(true);
-    const [shortcutValue, setShortcutValue] = useState({
-        ctrlSpaceToggle: true,
-        altBackquoteToggle: true,
-    });
+    const [shortcutBindings, setShortcutBindings] = useState<ShortcutBinding[]>(DEFAULT_SHORTCUTS);
     const [predictionEnabled, setPredictionEnabled] = useState(false);
     const [magic, setMagic] = useState({
         enabled: false,
@@ -46,10 +131,24 @@ export const General = () => {
                 }
                 setLiveConversionEnabled(data.live_conversion?.enabled ?? true);
                 const shortcuts = data.shortcuts ?? {};
-                setShortcutValue({
-                    ctrlSpaceToggle: shortcuts.ctrl_space_toggle ?? true,
-                    altBackquoteToggle: shortcuts.alt_backquote_toggle ?? true,
-                });
+                if (Array.isArray(shortcuts.toggle_bindings)) {
+                    setShortcutBindings(
+                        shortcuts.toggle_bindings
+                            .filter((binding: ShortcutBinding) =>
+                                binding &&
+                                Number.isInteger(binding.key_code) &&
+                                binding.key_code > 0 &&
+                                binding.key_code <= 0xff &&
+                                (binding.ctrl || binding.alt || binding.shift)
+                            )
+                            .slice(0, 2)
+                    );
+                } else {
+                    const legacy: ShortcutBinding[] = [];
+                    if (shortcuts.ctrl_space_toggle ?? true) legacy.push(DEFAULT_SHORTCUTS[0]);
+                    if (shortcuts.alt_backquote_toggle ?? true) legacy.push(DEFAULT_SHORTCUTS[1]);
+                    setShortcutBindings(legacy);
+                }
                 setPredictionEnabled(data.prediction?.enabled ?? false);
                 setMagic((current) => ({ ...current, ...(data.magic_conversion ?? {}) }));
             })
@@ -89,20 +188,57 @@ export const General = () => {
         }
     };
 
-    const updateShortcut = async (
-        key: "ctrl_space_toggle" | "alt_backquote_toggle",
-        enabled: boolean,
-    ) => {
+    const saveShortcutBindings = async (bindings: ShortcutBinding[]) => {
+        const next = bindings.slice(0, 2);
         if (await updateGeneralConfig((data) => {
             data.shortcuts = data.shortcuts ?? {};
-            data.shortcuts[key] = enabled;
+            data.shortcuts.toggle_bindings = next;
         })) {
-            if (key === "ctrl_space_toggle") {
-                setShortcutValue((current) => ({ ...current, ctrlSpaceToggle: enabled }));
-            } else {
-                setShortcutValue((current) => ({ ...current, altBackquoteToggle: enabled }));
-            }
+            setShortcutBindings(next);
         }
+    };
+
+    const captureShortcut = async (
+        index: number,
+        event: KeyboardEvent<HTMLInputElement>,
+    ) => {
+        event.preventDefault();
+        event.stopPropagation();
+
+        if (event.key === "Escape") {
+            event.currentTarget.blur();
+            return;
+        }
+
+        const binding = bindingFromKeyboardEvent(event);
+        if (!binding) {
+            toast("Ctrl / Alt / Shift のいずれかを含むショートカットを入力してください");
+            return;
+        }
+
+        if (
+            shortcutBindings.some(
+                (item, itemIndex) => itemIndex !== index && sameShortcut(item, binding),
+            )
+        ) {
+            toast("同じショートカットは2枠に登録できません");
+            return;
+        }
+
+        const next = [...shortcutBindings];
+        next[index] = binding;
+        await saveShortcutBindings(next.filter(Boolean));
+        event.currentTarget.blur();
+    };
+
+    const clearShortcut = async (index: number) => {
+        await saveShortcutBindings(
+            shortcutBindings.filter((_, itemIndex) => itemIndex !== index),
+        );
+    };
+
+    const resetShortcuts = async () => {
+        await saveShortcutBindings(DEFAULT_SHORTCUTS);
     };
 
     const updatePrediction = async (enabled: boolean) => {
@@ -206,33 +342,47 @@ export const General = () => {
             </section>
 
             <section className="space-y-2">
-                <h1 className="text-sm font-bold text-foreground">入力モード切替ショートカット</h1>
-                <div className="flex items-center space-x-4 rounded-md border p-4">
-                    <Keyboard />
-                    <div className="flex-1 space-y-1">
-                        <p className="text-sm font-medium leading-none">Ctrl + Space</p>
-                        <p className="text-xs text-muted-foreground">
-                            US配列でも英数/かなを切り替えられるようにします
-                        </p>
-                    </div>
-                    <Switch
-                        checked={shortcutValue.ctrlSpaceToggle}
-                        onCheckedChange={(enabled) => updateShortcut("ctrl_space_toggle", enabled)}
-                    />
+                <div className="flex items-center justify-between">
+                    <h1 className="text-sm font-bold text-foreground">
+                        入力モード切替ショートカット
+                    </h1>
+                    <Button variant="secondary" size="sm" onClick={resetShortcuts}>
+                        既定に戻す
+                    </Button>
                 </div>
-                <div className="flex items-center space-x-4 rounded-md border p-4">
-                    <Keyboard />
-                    <div className="flex-1 space-y-1">
-                        <p className="text-sm font-medium leading-none">Alt + `</p>
-                        <p className="text-xs text-muted-foreground">
-                            US配列の一般的なIME切替ショートカットを有効にします
-                        </p>
+                <p className="text-xs text-muted-foreground">
+                    2枠まで設定できます。入力欄を選択して、Ctrl / Alt / Shiftを含むキー操作を押してください。
+                </p>
+                {[0, 1].map((index) => (
+                    <div
+                        key={index}
+                        className="flex items-center space-x-4 rounded-md border p-4"
+                    >
+                        <Keyboard />
+                        <div className="flex-1 space-y-2">
+                            <p className="text-sm font-medium leading-none">
+                                ショートカット {index + 1}
+                            </p>
+                            <Input
+                                readOnly
+                                value={shortcutLabel(shortcutBindings[index])}
+                                onKeyDown={(event) => captureShortcut(index, event)}
+                                onFocus={(event) => event.currentTarget.select()}
+                                aria-label={`入力モード切替ショートカット ${index + 1}`}
+                            />
+                        </div>
+                        <Button
+                            variant="secondary"
+                            disabled={!shortcutBindings[index]}
+                            onClick={() => clearShortcut(index)}
+                        >
+                            解除
+                        </Button>
                     </div>
-                    <Switch
-                        checked={shortcutValue.altBackquoteToggle}
-                        onCheckedChange={(enabled) => updateShortcut("alt_backquote_toggle", enabled)}
-                    />
-                </div>
+                ))}
+                <p className="text-xs text-muted-foreground">
+                    VK_IME_ON / VK_IME_OFF と半角/全角キーはこの設定とは別に利用できます。
+                </p>
             </section>
 
             <section className="space-y-2">

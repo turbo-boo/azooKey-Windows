@@ -7,6 +7,20 @@
     },
     "shortcuts": {
         "ctrl_space_toggle": true,
-        "alt_backquote_toggle": true
+        "alt_backquote_toggle": true,
+        "toggle_bindings": [
+            {
+                "key_code": 32,
+                "ctrl": true,
+                "alt": false,
+                "shift": false
+            },
+            {
+                "key_code": 192,
+                "ctrl": false,
+                "alt": true,
+                "shift": false
+            }
+        ]
     }
 }

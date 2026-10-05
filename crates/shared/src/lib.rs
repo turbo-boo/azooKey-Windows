@@ -26,6 +26,27 @@ pub struct ZenzaiConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ShortcutConfig {
+    #[serde(default = "default_shortcut_enabled")]
+    pub ctrl_space_toggle: bool,
+    #[serde(default = "default_shortcut_enabled")]
+    pub alt_backquote_toggle: bool,
+}
+
+fn default_shortcut_enabled() -> bool {
+    true
+}
+
+impl Default for ShortcutConfig {
+    fn default() -> Self {
+        Self {
+            ctrl_space_toggle: true,
+            alt_backquote_toggle: true,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default)]
 pub struct LearningConfig {
     pub mode: String,
@@ -160,6 +181,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub learning: LearningConfig,
     #[serde(default)]
+    pub shortcuts: ShortcutConfig,
+    #[serde(default)]
     pub dictionary: UserDictionaryConfig,
     #[serde(default)]
     pub theme: ThemeConfig,
@@ -183,6 +206,7 @@ impl Default for AppConfig {
                 backend: "vulkan".to_string(),
             },
             learning: LearningConfig::default(),
+            shortcuts: ShortcutConfig::default(),
             dictionary: UserDictionaryConfig::default(),
             theme: ThemeConfig::default(),
             personalization: PersonalizationConfig::default(),
@@ -509,6 +533,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.learning.mode, "inputAndOutput");
+        assert!(config.shortcuts.ctrl_space_toggle);
+        assert!(config.shortcuts.alt_backquote_toggle);
         assert_eq!(config.theme.mode, "system");
         assert!(!config.personalization.enabled);
         assert!(config.live_conversion.enabled);
@@ -525,6 +551,7 @@ mod tests {
                 "version":"0.1.0",
                 "zenzai":{"enable":true,"profile":"test","backend":"cpu"},
                 "theme":{"mode":"dark"},
+                "shortcuts":{"ctrl_space_toggle":false},
                 "prediction":{"enabled":true},
                 "magic_conversion":{"enabled":true,"endpoint":"http://127.0.0.1:8080/v1/chat/completions"}
             }"#,
@@ -533,6 +560,8 @@ mod tests {
 
         assert_eq!(config.theme.mode, "dark");
         assert_eq!(config.theme.text_color, "");
+        assert!(!config.shortcuts.ctrl_space_toggle);
+        assert!(config.shortcuts.alt_backquote_toggle);
         assert!(config.live_conversion.enabled);
         assert!(config.prediction.enabled);
         assert_eq!(config.prediction.max_candidates, 5);

@@ -10,7 +10,10 @@ use windows::{
 };
 
 use crate::{
-    engine::{client_action::ClientAction, composition::CompositionState},
+    engine::{
+        client_action::ClientAction,
+        composition::{ctrl_space_shortcut_enabled, CompositionState},
+    },
     extension::VKeyExt as _,
 };
 
@@ -22,6 +25,7 @@ fn should_intercept_control_shortcut(
     control_pressed: bool,
     key_code: usize,
     composition_active: bool,
+    is_ime_toggle_shortcut: bool,
 ) -> bool {
     // Do not cancel on the modifier key itself. Wait for the actual shortcut key.
     const VK_CONTROL_CODE: usize = 0x11;
@@ -30,6 +34,7 @@ fn should_intercept_control_shortcut(
 
     control_pressed
         && composition_active
+        && !is_ime_toggle_shortcut
         && !matches!(
             key_code,
             VK_CONTROL_CODE | VK_LCONTROL_CODE | VK_RCONTROL_CODE
@@ -44,7 +49,7 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
         &self,
         pic: Option<&ITfContext>,
         wparam: WPARAM,
-        _lparam: LPARAM,
+        lparam: LPARAM,
     ) -> Result<BOOL> {
         // A control shortcut needs one pass through OnKeyDown so the active
         // composition can be cancelled before the application receives the key.
@@ -53,21 +58,23 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
             VK_CONTROL.is_pressed(),
             wparam.0,
             self.has_active_composition()?,
+            ctrl_space_shortcut_enabled(wparam),
         ) {
             return Ok(true.into());
         }
 
-        let result = self.process_key(pic, wparam)?.is_some();
+        let result = self.process_key(pic, wparam, lparam)?.is_some();
         Ok(result.into())
     }
 
     #[macros::anyhow]
     #[tracing::instrument]
-    fn OnKeyDown(&self, pic: Option<&ITfContext>, wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
+    fn OnKeyDown(&self, pic: Option<&ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
         if should_intercept_control_shortcut(
             VK_CONTROL.is_pressed(),
             wparam.0,
             self.has_active_composition()?,
+            ctrl_space_shortcut_enabled(wparam),
         ) {
             if let Some(context) = pic {
                 self.borrow_mut()?.context = Some(context.clone());
@@ -80,7 +87,7 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
             return Ok(false.into());
         }
 
-        let result = self.handle_key(pic, wparam)?;
+        let result = self.handle_key(pic, wparam, lparam)?;
         Ok(result.into())
     }
 
@@ -122,15 +129,16 @@ mod tests {
 
     #[test]
     fn control_shortcut_is_intercepted_only_with_active_composition() {
-        assert!(should_intercept_control_shortcut(true, b'A' as usize, true));
-        assert!(!should_intercept_control_shortcut(false, b'A' as usize, true));
-        assert!(!should_intercept_control_shortcut(true, b'A' as usize, false));
+        assert!(should_intercept_control_shortcut(true, b'A' as usize, true, false));
+        assert!(!should_intercept_control_shortcut(false, b'A' as usize, true, false));
+        assert!(!should_intercept_control_shortcut(true, b'A' as usize, false, false));
+        assert!(!should_intercept_control_shortcut(true, 0x20, true, true));
     }
 
     #[test]
     fn control_modifier_key_itself_does_not_cancel_composition() {
-        assert!(!should_intercept_control_shortcut(true, 0x11, true));
-        assert!(!should_intercept_control_shortcut(true, 0xA2, true));
-        assert!(!should_intercept_control_shortcut(true, 0xA3, true));
+        assert!(!should_intercept_control_shortcut(true, 0x11, true, false));
+        assert!(!should_intercept_control_shortcut(true, 0xA2, true, false));
+        assert!(!should_intercept_control_shortcut(true, 0xA3, true, false));
     }
 }

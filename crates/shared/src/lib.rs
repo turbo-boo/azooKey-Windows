@@ -180,7 +180,7 @@ impl Default for AppConfig {
             zenzai: ZenzaiConfig {
                 enable: false,
                 profile: String::new(),
-                backend: "cpu".to_string(),
+                backend: "vulkan".to_string(),
             },
             learning: LearningConfig::default(),
             dictionary: UserDictionaryConfig::default(),
@@ -492,6 +492,11 @@ mod tests {
             vec!["自然な候補".to_string()]
         );
         assert!(parse_magic_candidates(&serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn default_config_prefers_vulkan_backend() {
+        assert_eq!(AppConfig::default().zenzai.backend, "vulkan");
     }
 
     #[test]

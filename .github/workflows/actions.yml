@@ -48,6 +48,9 @@ jobs:
     - name: Client pure unit tests
       run: cargo test --locked -p azookey-windows --lib
 
+    - name: Launcher unit tests
+      run: cargo test --locked -p launcher
+
     - name: Validate startup task template
       shell: pwsh
       run: |

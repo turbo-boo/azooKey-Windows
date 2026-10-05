@@ -15,10 +15,13 @@ use super::{
     text_util::{to_half_katakana, to_katakana},
     user_action::{Function, Navigation},
 };
+use shared::AppConfig;
 use windows::Win32::{
-    Foundation::WPARAM,
+    Foundation::{LPARAM, WPARAM},
     UI::{
-        Input::KeyboardAndMouse::VK_CONTROL,
+        Input::KeyboardAndMouse::{
+            VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_MENU, VK_RCONTROL, VK_RMENU,
+        },
         TextServices::{ITfComposition, ITfCompositionSink_Impl, ITfContext},
     },
 };
@@ -84,6 +87,28 @@ fn candidate_is_learnable(candidates: &Candidates, index: usize) -> bool {
             .is_some_and(|id| *id >= 0)
 }
 
+fn is_ctrl_pressed() -> bool {
+    VK_CONTROL.is_pressed() || VK_LCONTROL.is_pressed() || VK_RCONTROL.is_pressed()
+}
+
+fn is_alt_backquote_key(wparam: WPARAM, lparam: LPARAM, alt_pressed: bool) -> bool {
+    const VK_OEM_3: usize = 0xC0;
+    const SCAN_CODE_BACKQUOTE: usize = 0x29;
+    const ALT_CONTEXT_BIT: usize = 0x2000_0000;
+
+    let alt_context = ((lparam.0 as usize) & ALT_CONTEXT_BIT) != 0;
+    let scan_code = ((lparam.0 as usize) >> 16) & 0xFF;
+    let is_backquote = wparam.0 == VK_OEM_3 || scan_code == SCAN_CODE_BACKQUOTE;
+    (alt_pressed || alt_context) && is_backquote
+}
+
+pub(crate) fn ctrl_space_shortcut_enabled(wparam: WPARAM) -> bool {
+    if !is_ctrl_pressed() || wparam.0 != 0x20 {
+        return false;
+    }
+    AppConfig::read().shortcuts.ctrl_space_toggle
+}
+
 impl TextServiceFactory {
     #[tracing::instrument]
     pub fn has_active_composition(&self) -> Result<bool> {
@@ -99,13 +124,30 @@ impl TextServiceFactory {
         &self,
         context: Option<&ITfContext>,
         wparam: WPARAM,
+        lparam: LPARAM,
     ) -> Result<Option<(Vec<ClientAction>, CompositionState)>> {
         if context.is_none() {
             return Ok(None);
         };
 
-        // check shortcut keys
-        if VK_CONTROL.is_pressed() {
+        let ctrl_pressed = is_ctrl_pressed();
+        let ctrl_space = ctrl_pressed && wparam.0 == 0x20;
+        let alt_pressed = VK_MENU.is_pressed() || VK_LMENU.is_pressed() || VK_RMENU.is_pressed();
+        let alt_backquote = !ctrl_pressed && is_alt_backquote_key(wparam, lparam, alt_pressed);
+
+        if ctrl_space || alt_backquote {
+            let shortcuts = AppConfig::read().shortcuts;
+            if ctrl_space && !shortcuts.ctrl_space_toggle {
+                return Ok(None);
+            }
+            if alt_backquote && !shortcuts.alt_backquote_toggle {
+                return Ok(None);
+            }
+        }
+
+        // Other Ctrl shortcuts are passed back to the application. key_event_sink
+        // cancels an active composition first.
+        if ctrl_pressed && !ctrl_space {
             return Ok(None);
         }
 
@@ -117,7 +159,31 @@ impl TextServiceFactory {
             (composition, mode)
         };
 
-        let action = UserAction::try_from(wparam.0)?;
+        let action = if ctrl_space || alt_backquote {
+            UserAction::ToggleInputMode
+        } else {
+            UserAction::try_from(wparam.0)?
+        };
+
+        let explicit_input_mode = match &action {
+            UserAction::InputModeOn => Some(InputMode::Kana),
+            UserAction::InputModeOff => Some(InputMode::Latin),
+            _ => None,
+        };
+        if let Some(target_mode) = explicit_input_mode {
+            let actions = match composition.state {
+                CompositionState::None => vec![ClientAction::SetIMEMode(target_mode)],
+                CompositionState::Selecting => vec![
+                    ClientAction::DismissPredictions,
+                    ClientAction::SetIMEMode(target_mode),
+                ],
+                CompositionState::Composing | CompositionState::Previewing => vec![
+                    ClientAction::EndComposition,
+                    ClientAction::SetIMEMode(target_mode),
+                ],
+            };
+            return Ok(Some((actions, CompositionState::None)));
+        }
 
         let (transition, actions) = match composition.state {
             CompositionState::None => match action {
@@ -415,14 +481,19 @@ impl TextServiceFactory {
     }
 
     #[tracing::instrument]
-    pub fn handle_key(&self, context: Option<&ITfContext>, wparam: WPARAM) -> Result<bool> {
+    pub fn handle_key(
+        &self,
+        context: Option<&ITfContext>,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> Result<bool> {
         if let Some(context) = context {
             self.borrow_mut()?.context = Some(context.clone());
         } else {
             return Ok(false);
         };
 
-        if let Some((actions, transition)) = self.process_key(context, wparam)? {
+        if let Some((actions, transition)) = self.process_key(context, wparam, lparam)? {
             self.handle_action(&actions, transition)?;
         } else {
             return Ok(false);
@@ -917,11 +988,12 @@ impl TextServiceFactory {
 
 #[cfg(test)]
 mod tests {
-    use super::{candidate_is_learnable, conversion_key_action};
+    use super::{candidate_is_learnable, conversion_key_action, is_alt_backquote_key};
     use crate::engine::{
         client_action::{ClientAction, SetSelectionType},
         ipc_service::Candidates,
     };
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
 
     #[test]
     fn first_conversion_key_requests_candidates_when_live_conversion_is_off() {
@@ -933,6 +1005,20 @@ mod tests {
             conversion_key_action(true),
             ClientAction::SetSelection(SetSelectionType::Down)
         );
+    }
+
+    #[test]
+    fn alt_backquote_accepts_vk_or_scan_code_with_alt_context() {
+        const ALT_CONTEXT: isize = 0x2000_0000;
+        const BACKQUOTE_SCAN: isize = 0x29 << 16;
+
+        assert!(is_alt_backquote_key(WPARAM(0xC0), LPARAM(ALT_CONTEXT), false));
+        assert!(is_alt_backquote_key(
+            WPARAM(0),
+            LPARAM(ALT_CONTEXT | BACKQUOTE_SCAN),
+            false,
+        ));
+        assert!(!is_alt_backquote_key(WPARAM(0xC0), LPARAM(0), false));
     }
 
     #[test]

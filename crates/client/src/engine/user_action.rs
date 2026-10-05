@@ -15,6 +15,8 @@ pub enum UserAction {
     Function(Function),
     Number(i8),
     ToggleInputMode,
+    InputModeOn,
+    InputModeOff,
 }
 
 #[derive(Debug)]
@@ -65,6 +67,9 @@ impl TryFrom<usize> for UserAction {
                     _ => UserAction::Unknown,
                 }
             }
+
+            0x16 => UserAction::InputModeOn,  // VK_IME_ON
+            0x1A => UserAction::InputModeOff, // VK_IME_OFF
 
             0x74 => UserAction::Function(Function::Five), // VK_F5
             0x75 => UserAction::Function(Function::Six), // VK_F6

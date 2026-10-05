@@ -6,7 +6,7 @@ import {
     SelectTrigger,
     SelectValue,
 } from "@/components/ui/select";
-import { Brain, ExternalLink, RefreshCcw, Sparkles, Trash2 } from "lucide-react";
+import { Brain, ExternalLink, Keyboard, RefreshCcw, Sparkles, Trash2 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -19,6 +19,10 @@ type LearningMode = "inputAndOutput" | "onlyOutput" | "nothing";
 export const General = () => {
     const [learningMode, setLearningMode] = useState<LearningMode>("inputAndOutput");
     const [liveConversionEnabled, setLiveConversionEnabled] = useState(true);
+    const [shortcutValue, setShortcutValue] = useState({
+        ctrlSpaceToggle: true,
+        altBackquoteToggle: true,
+    });
     const [predictionEnabled, setPredictionEnabled] = useState(false);
     const [magic, setMagic] = useState({
         enabled: false,
@@ -41,6 +45,11 @@ export const General = () => {
                     setLearningMode(mode);
                 }
                 setLiveConversionEnabled(data.live_conversion?.enabled ?? true);
+                const shortcuts = data.shortcuts ?? {};
+                setShortcutValue({
+                    ctrlSpaceToggle: shortcuts.ctrl_space_toggle ?? true,
+                    altBackquoteToggle: shortcuts.alt_backquote_toggle ?? true,
+                });
                 setPredictionEnabled(data.prediction?.enabled ?? false);
                 setMagic((current) => ({ ...current, ...(data.magic_conversion ?? {}) }));
             })
@@ -77,6 +86,22 @@ export const General = () => {
             data.live_conversion = { enabled };
         })) {
             setLiveConversionEnabled(enabled);
+        }
+    };
+
+    const updateShortcut = async (
+        key: "ctrl_space_toggle" | "alt_backquote_toggle",
+        enabled: boolean,
+    ) => {
+        if (await updateGeneralConfig((data) => {
+            data.shortcuts = data.shortcuts ?? {};
+            data.shortcuts[key] = enabled;
+        })) {
+            if (key === "ctrl_space_toggle") {
+                setShortcutValue((current) => ({ ...current, ctrlSpaceToggle: enabled }));
+            } else {
+                setShortcutValue((current) => ({ ...current, altBackquoteToggle: enabled }));
+            }
         }
     };
 
@@ -177,6 +202,36 @@ export const General = () => {
                         </p>
                     </div>
                     <Switch checked={liveConversionEnabled} onCheckedChange={updateLiveConversion} />
+                </div>
+            </section>
+
+            <section className="space-y-2">
+                <h1 className="text-sm font-bold text-foreground">入力モード切替ショートカット</h1>
+                <div className="flex items-center space-x-4 rounded-md border p-4">
+                    <Keyboard />
+                    <div className="flex-1 space-y-1">
+                        <p className="text-sm font-medium leading-none">Ctrl + Space</p>
+                        <p className="text-xs text-muted-foreground">
+                            US配列でも英数/かなを切り替えられるようにします
+                        </p>
+                    </div>
+                    <Switch
+                        checked={shortcutValue.ctrlSpaceToggle}
+                        onCheckedChange={(enabled) => updateShortcut("ctrl_space_toggle", enabled)}
+                    />
+                </div>
+                <div className="flex items-center space-x-4 rounded-md border p-4">
+                    <Keyboard />
+                    <div className="flex-1 space-y-1">
+                        <p className="text-sm font-medium leading-none">Alt + `</p>
+                        <p className="text-xs text-muted-foreground">
+                            US配列の一般的なIME切替ショートカットを有効にします
+                        </p>
+                    </div>
+                    <Switch
+                        checked={shortcutValue.altBackquoteToggle}
+                        onCheckedChange={(enabled) => updateShortcut("alt_backquote_toggle", enabled)}
+                    />
                 </div>
             </section>
 

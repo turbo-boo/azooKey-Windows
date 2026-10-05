@@ -1,5 +1,3 @@
-use std::cmp::{max, min};
-
 use crate::{
     engine::user_action::UserAction,
     extension::VKeyExt as _,
@@ -85,6 +83,31 @@ fn candidate_is_learnable(candidates: &Candidates, index: usize) -> bool {
             .candidate_ids
             .get(index)
             .is_some_and(|id| *id >= 0)
+}
+
+fn candidate_parts(candidates: &Candidates, index: i32) -> Option<(String, String, i32)> {
+    let index = usize::try_from(index).ok()?;
+    Some((
+        candidates.texts.get(index)?.clone(),
+        candidates.sub_texts.get(index)?.clone(),
+        *candidates.corresponding_count.get(index)?,
+    ))
+}
+
+fn next_selection_index(
+    candidate_count: usize,
+    current: i32,
+    selection: &SetSelectionType,
+) -> Option<i32> {
+    if candidate_count == 0 {
+        return None;
+    }
+    let last = i32::try_from(candidate_count - 1).ok()?;
+    Some(match selection {
+        SetSelectionType::Up => (current - 1).clamp(0, last),
+        SetSelectionType::Down => (current + 1).clamp(0, last),
+        SetSelectionType::Number(number) => (*number).clamp(0, last),
+    })
 }
 
 fn is_ctrl_pressed() -> bool {
@@ -584,16 +607,28 @@ impl TextServiceFactory {
                     };
 
                     candidates = ipc_service.append_text(text.clone())?;
-                    let text = candidates.texts[selection_index as usize].clone();
-                    let sub_text = candidates.sub_texts[selection_index as usize].clone();
                     let hiragana = candidates.hiragana.clone();
+                    let Some((text, sub_text, count)) =
+                        candidate_parts(&candidates, selection_index)
+                    else {
+                        selection_index = 0;
+                        corresponding_count = 0;
+                        preview = hiragana.clone();
+                        suffix.clear();
+                        raw_hiragana = hiragana;
+                        should_learn_candidate = false;
+                        self.set_text(&preview, "")?;
+                        ipc_service.hide_window()?;
+                        ipc_service.set_candidates(vec![])?;
+                        continue;
+                    };
 
-                    corresponding_count = candidates.corresponding_count[selection_index as usize];
-
+                    corresponding_count = count;
                     preview = text.clone();
                     suffix = sub_text.clone();
                     raw_hiragana = hiragana.clone();
-                    should_learn_candidate = candidate_is_learnable(&candidates, selection_index as usize);
+                    should_learn_candidate =
+                        candidate_is_learnable(&candidates, selection_index as usize);
 
                     self.set_text(&text, &sub_text)?;
                     if candidates.is_converted {
@@ -613,9 +648,12 @@ impl TextServiceFactory {
 
                     candidates = converted;
                     selection_index = 0;
-                    let text = candidates.texts[0].clone();
-                    let sub_text = candidates.sub_texts[0].clone();
-                    corresponding_count = candidates.corresponding_count[0];
+                    let Some((text, sub_text, count)) = candidate_parts(&candidates, 0) else {
+                        ipc_service.hide_window()?;
+                        ipc_service.set_candidates(vec![])?;
+                        continue;
+                    };
+                    corresponding_count = count;
                     preview = text.clone();
                     suffix = sub_text.clone();
                     if !candidates.hiragana.is_empty() {
@@ -888,25 +926,36 @@ impl TextServiceFactory {
                     };
 
                     let texts = candidates.texts.clone();
-                    let sub_texts = candidates.sub_texts.clone();
 
-                    selection_index = match selection {
-                        SetSelectionType::Up => max(0, selection_index - 1),
-                        SetSelectionType::Down => min(texts.len() as i32 - 1, selection_index + 1),
-                        SetSelectionType::Number(number) => *number,
+                    let Some(next_index) =
+                        next_selection_index(texts.len(), selection_index, selection)
+                    else {
+                        selection_index = 0;
+                        should_learn_candidate = false;
+                        ipc_service.hide_window()?;
+                        ipc_service.set_candidates(vec![])?;
+                        continue;
                     };
+                    selection_index = next_index;
 
-                    ipc_service.set_selection(selection_index as i32)?;
+                    ipc_service.set_selection(selection_index)?;
                     if composition.state != CompositionState::Selecting {
-                        let text = texts[selection_index as usize].clone();
-                        let sub_text = sub_texts[selection_index as usize].clone();
+                        let Some((text, sub_text, count)) =
+                            candidate_parts(&candidates, selection_index)
+                        else {
+                            should_learn_candidate = false;
+                            ipc_service.hide_window()?;
+                            ipc_service.set_candidates(vec![])?;
+                            continue;
+                        };
                         let hiragana = candidates.hiragana.clone();
-                        corresponding_count = candidates.corresponding_count[selection_index as usize];
+                        corresponding_count = count;
 
                         preview = text.clone();
                         suffix = sub_text.clone();
                         raw_hiragana = hiragana.clone();
-                        should_learn_candidate = candidate_is_learnable(&candidates, selection_index as usize);
+                        should_learn_candidate =
+                            candidate_is_learnable(&candidates, selection_index as usize);
 
                         self.set_text(&text, &sub_text)?;
                     }
@@ -931,16 +980,30 @@ impl TextServiceFactory {
                     };
                     selection_index = 0;
 
-                    let text = candidates.texts[selection_index as usize].clone();
-                    let sub_text = candidates.sub_texts[selection_index as usize].clone();
                     let hiragana = candidates.hiragana.clone();
+                    let Some((text, sub_text, count)) =
+                        candidate_parts(&candidates, selection_index)
+                    else {
+                        corresponding_count = 0;
+                        let remaining = hiragana.clone();
+                        self.shift_start(&preview, &remaining)?;
+                        preview = remaining;
+                        suffix.clear();
+                        raw_hiragana = hiragana;
+                        should_learn_candidate = false;
+                        ipc_service.hide_window()?;
+                        ipc_service.set_candidates(vec![])?;
+                        transition = CompositionState::Composing;
+                        continue;
+                    };
                     self.shift_start(&preview, &text)?;
 
-                    corresponding_count = candidates.corresponding_count[selection_index as usize];
+                    corresponding_count = count;
                     preview = text.clone();
                     suffix = sub_text.clone();
                     raw_hiragana = hiragana.clone();
-                    should_learn_candidate = candidate_is_learnable(&candidates, selection_index as usize);
+                    should_learn_candidate =
+                        candidate_is_learnable(&candidates, selection_index as usize);
 
                     if candidates.is_converted {
                         ipc_service.set_candidates(candidates.texts.clone())?;
@@ -988,7 +1051,10 @@ impl TextServiceFactory {
 
 #[cfg(test)]
 mod tests {
-    use super::{candidate_is_learnable, conversion_key_action, is_alt_backquote_key};
+    use super::{
+        candidate_is_learnable, candidate_parts, conversion_key_action, is_alt_backquote_key,
+        next_selection_index,
+    };
     use crate::engine::{
         client_action::{ClientAction, SetSelectionType},
         ipc_service::Candidates,
@@ -1019,6 +1085,35 @@ mod tests {
             false,
         ));
         assert!(!is_alt_backquote_key(WPARAM(0xC0), LPARAM(0), false));
+    }
+
+    #[test]
+    fn candidate_parts_rejects_missing_or_misaligned_candidates() {
+        let empty = Candidates::default();
+        assert!(candidate_parts(&empty, 0).is_none());
+
+        let malformed = Candidates {
+            texts: vec!["候補".to_string()],
+            sub_texts: vec![],
+            corresponding_count: vec![1],
+            ..Candidates::default()
+        };
+        assert!(candidate_parts(&malformed, 0).is_none());
+        assert!(candidate_parts(&malformed, -1).is_none());
+    }
+
+    #[test]
+    fn selection_index_is_clamped_and_empty_lists_are_rejected() {
+        assert_eq!(next_selection_index(0, 0, &SetSelectionType::Down), None);
+        assert_eq!(
+            next_selection_index(3, 2, &SetSelectionType::Down),
+            Some(2)
+        );
+        assert_eq!(next_selection_index(3, 0, &SetSelectionType::Up), Some(0));
+        assert_eq!(
+            next_selection_index(3, 0, &SetSelectionType::Number(99)),
+            Some(2)
+        );
     }
 
     #[test]

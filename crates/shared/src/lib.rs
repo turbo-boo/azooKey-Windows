@@ -103,6 +103,18 @@ impl Default for PersonalizationConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default)]
+pub struct LiveConversionConfig {
+    pub enabled: bool,
+}
+
+impl Default for LiveConversionConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
 pub struct PredictionConfig {
     pub enabled: bool,
     pub max_candidates: usize,
@@ -154,6 +166,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub personalization: PersonalizationConfig,
     #[serde(default)]
+    pub live_conversion: LiveConversionConfig,
+    #[serde(default)]
     pub prediction: PredictionConfig,
     #[serde(default)]
     pub magic_conversion: MagicConversionConfig,
@@ -172,6 +186,7 @@ impl Default for AppConfig {
             dictionary: UserDictionaryConfig::default(),
             theme: ThemeConfig::default(),
             personalization: PersonalizationConfig::default(),
+            live_conversion: LiveConversionConfig::default(),
             prediction: PredictionConfig::default(),
             magic_conversion: MagicConversionConfig::default(),
         }
@@ -491,6 +506,7 @@ mod tests {
         assert_eq!(config.learning.mode, "inputAndOutput");
         assert_eq!(config.theme.mode, "system");
         assert!(!config.personalization.enabled);
+        assert!(config.live_conversion.enabled);
         assert!(!config.prediction.enabled);
         assert_eq!(config.prediction.max_candidates, 5);
         assert!(!config.magic_conversion.enabled);
@@ -512,6 +528,7 @@ mod tests {
 
         assert_eq!(config.theme.mode, "dark");
         assert_eq!(config.theme.text_color, "");
+        assert!(config.live_conversion.enabled);
         assert!(config.prediction.enabled);
         assert_eq!(config.prediction.max_candidates, 5);
         assert!(config.magic_conversion.enabled);

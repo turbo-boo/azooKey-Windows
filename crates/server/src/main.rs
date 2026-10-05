@@ -9,14 +9,17 @@ use shared::proto::{
     CommitPredictionRequest, CommitPredictionResponse, GetPostCompositionPredictionsRequest,
     GetPostCompositionPredictionsResponse, MagicConvertRequest, MagicConvertResponse,
     MoveCursorRequest, MoveCursorResponse, PredictionSuggestion, RemoveTextRequest,
-    RemoveTextResponse, ShrinkTextRequest, ShrinkTextResponse, Suggestion,
+    RemoveTextResponse, RequestConversionRequest, RequestConversionResponse,
+    ShrinkTextRequest, ShrinkTextResponse, Suggestion,
 };
 use shared::{parse_magic_candidates, validate_magic_endpoint_parts, AppConfig};
 
 use std::ffi::{c_char, c_int, CStr, CString};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 const USE_ZENZAI: bool = true;
+static LIVE_CONVERSION_ENABLED: AtomicBool = AtomicBool::new(true);
 
 struct RawComposingText {
     text: String,
@@ -150,6 +153,36 @@ fn get_composed_text() -> Vec<Suggestion> {
     }
 }
 
+fn refresh_runtime_config() {
+    LIVE_CONVERSION_ENABLED.store(
+        AppConfig::read().live_conversion.enabled,
+        Ordering::Relaxed,
+    );
+}
+
+fn composing_text_response(raw: RawComposingText, force_conversion: bool) -> ComposingText {
+    let is_converted =
+        force_conversion || LIVE_CONVERSION_ENABLED.load(Ordering::Relaxed);
+    let suggestions = if is_converted {
+        get_composed_text()
+    } else if raw.text.is_empty() {
+        vec![]
+    } else {
+        vec![Suggestion {
+            text: raw.text.clone(),
+            subtext: String::new(),
+            corresponding_count: raw.text.chars().count() as i32,
+            candidate_id: -1,
+        }]
+    };
+
+    ComposingText {
+        hiragana: raw.text,
+        suggestions,
+        is_converted,
+    }
+}
+
 fn get_post_composition_predictions() -> Vec<PredictionSuggestion> {
     unsafe {
         let mut length: c_int = 0;
@@ -261,10 +294,7 @@ impl AzookeyService for MyAzookeyService {
         let composing_text = add_text(&input);
 
         Ok(Response::new(AppendTextResponse {
-            composing_text: Some(ComposingText {
-                hiragana: composing_text.text,
-                suggestions: get_composed_text().to_vec(),
-            }),
+            composing_text: Some(composing_text_response(composing_text, false)),
         }))
     }
 
@@ -275,10 +305,7 @@ impl AzookeyService for MyAzookeyService {
         let composing_text = remove_text();
 
         Ok(Response::new(RemoveTextResponse {
-            composing_text: Some(ComposingText {
-                hiragana: composing_text.text,
-                suggestions: get_composed_text().to_vec(),
-            }),
+            composing_text: Some(composing_text_response(composing_text, false)),
         }))
     }
 
@@ -290,10 +317,7 @@ impl AzookeyService for MyAzookeyService {
         let composing_text = move_cursor(offset);
 
         Ok(Response::new(MoveCursorResponse {
-            composing_text: Some(ComposingText {
-                hiragana: composing_text.text,
-                suggestions: get_composed_text().to_vec(),
-            }),
+            composing_text: Some(composing_text_response(composing_text, false)),
         }))
     }
 
@@ -313,10 +337,17 @@ impl AzookeyService for MyAzookeyService {
         let composing_text = shrink_text(offset);
 
         Ok(Response::new(ShrinkTextResponse {
-            composing_text: Some(ComposingText {
-                hiragana: composing_text.text,
-                suggestions: get_composed_text().to_vec(),
-            }),
+            composing_text: Some(composing_text_response(composing_text, true)),
+        }))
+    }
+
+    async fn request_conversion(
+        &self,
+        _: Request<RequestConversionRequest>,
+    ) -> Result<Response<RequestConversionResponse>, Status> {
+        let composing_text = move_cursor(0);
+        Ok(Response::new(RequestConversionResponse {
+            composing_text: Some(composing_text_response(composing_text, true)),
         }))
     }
 
@@ -341,6 +372,7 @@ impl AzookeyService for MyAzookeyService {
         &self,
         _: Request<shared::proto::UpdateConfigRequest>,
     ) -> Result<Response<shared::proto::UpdateConfigResponse>, Status> {
+        refresh_runtime_config();
         unsafe { LoadConfig() };
         Ok(Response::new(shared::proto::UpdateConfigResponse {}))
     }
@@ -415,6 +447,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let current_exe = std::env::current_exe()?;
     let parent_dir = current_exe.parent().unwrap();
     initialize(parent_dir.to_str().unwrap());
+    refresh_runtime_config();
 
     let service = MyAzookeyService::default();
 

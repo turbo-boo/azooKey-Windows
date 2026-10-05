@@ -7,6 +7,7 @@ pub enum ClientAction {
     CancelComposition,
 
     AppendText(String),
+    RequestConversion,
     RemoveText,
     ShrinkText(String),
     CommitCandidate,

@@ -13,6 +13,7 @@ message Suggestion {
 message ComposingText {
   string hiragana = 1; // The main text content.
   repeated Suggestion suggestions = 2; // List of suggestions for the text.
+  bool is_converted = 3; // Whether suggestions came from the converter.
 }
 
 // Request message for AppendText.
@@ -57,6 +58,11 @@ message ClearTextRequest {}
 
 // Response message for ClearText.
 message ClearTextResponse {}
+
+message RequestConversionRequest {}
+message RequestConversionResponse {
+  ComposingText composing_text = 1;
+}
 
 message SetContextRequest {
   string context = 1;
@@ -114,6 +120,7 @@ service AzookeyService {
   rpc ShrinkText (ShrinkTextRequest) returns (ShrinkTextResponse);
   rpc MoveCursor (MoveCursorRequest) returns (MoveCursorResponse);
   rpc ClearText (ClearTextRequest) returns (ClearTextResponse);
+  rpc RequestConversion (RequestConversionRequest) returns (RequestConversionResponse);
   rpc SetContext (SetContextRequest) returns (SetContextResponse);
   rpc UpdateConfig (UpdateConfigRequest) returns (UpdateConfigResponse);
   rpc CommitCandidate (CommitCandidateRequest) returns (CommitCandidateResponse);

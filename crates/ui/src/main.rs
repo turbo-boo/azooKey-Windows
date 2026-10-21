@@ -173,8 +173,11 @@ async fn main() -> anyhow::Result<()> {
                         .unwrap();
                 }
                 UserEvent::UpdateInputMethod(input_method) => {
+                    // The mode string arrives over IPC; pass it as a JSON
+                    // literal so it cannot inject script into the webview.
+                    let input_method = serde_json::Value::from(input_method).to_string();
                     indicator_webview
-                        .evaluate_script(&format!("updateInputMethod(\"{}\")", input_method))
+                        .evaluate_script(&format!("updateInputMethod({})", input_method))
                         .unwrap();
                 }
                 UserEvent::UpdateHeight(height) => {

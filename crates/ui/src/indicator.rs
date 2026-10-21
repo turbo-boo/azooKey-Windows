@@ -101,3 +101,27 @@ pub fn create_indicator_webview(window: &Window) -> Result<WebView> {
 
     Ok(webview)
 }
+
+/// Script that shows `mode` in the indicator. The mode string arrives over IPC,
+/// so it is passed as a JSON string literal and cannot inject script.
+pub fn input_mode_script(mode: &str) -> String {
+    format!("updateInputMethod({})", serde_json::Value::from(mode))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::input_mode_script;
+
+    #[test]
+    fn input_mode_is_passed_as_a_single_string_literal() {
+        assert_eq!(input_mode_script("あ"), r#"updateInputMethod("あ")"#);
+
+        let hostile = r#"A"); location.href = "https://example.com"; ("#;
+        let script = input_mode_script(hostile);
+        let argument = script
+            .strip_prefix("updateInputMethod(")
+            .and_then(|rest| rest.strip_suffix(')'))
+            .expect("one call");
+        assert_eq!(serde_json::from_str::<String>(argument).unwrap(), hostile);
+    }
+}

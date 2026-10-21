@@ -95,6 +95,7 @@ pub fn duplicate_winlogon_token(
             ..Default::default()
         };
 
+        let mut found = false;
         Process32First(snapshot, &mut process_entry)?;
         while let Ok(()) = Process32Next(snapshot, &mut process_entry) {
             // check if the process is winlogon
@@ -109,43 +110,63 @@ pub fn duplicate_winlogon_token(
                 continue;
             }
 
-            let process = OpenProcess(
+            // With RDP or fast user switching there is one winlogon per
+            // session; only the one in our session is usable.
+            let Ok(process) = OpenProcess(
                 PROCESS_QUERY_LIMITED_INFORMATION,
                 false,
                 process_entry.th32ProcessID,
-            )?;
+            ) else {
+                continue;
+            };
 
             let mut token = HANDLE::default();
-            OpenProcessToken(process, TOKEN_QUERY | TOKEN_DUPLICATE, &mut token)?;
+            let opened = OpenProcessToken(process, TOKEN_QUERY | TOKEN_DUPLICATE, &mut token);
+            let _ = CloseHandle(process);
+            if opened.is_err() {
+                continue;
+            }
 
-            let mut privilege_result = false.into();
-            PrivilegeCheck(token, &mut privilege_set as *mut _, &mut privilege_result)?;
+            let duplicated = (|| -> Result<bool> {
+                let mut privilege_result = false.into();
+                PrivilegeCheck(token, &mut privilege_set as *mut _, &mut privilege_result)?;
+                if !privilege_result.as_bool() {
+                    return Ok(false);
+                }
 
-            let mut token_session_id: u32 = 0;
-            let mut token_info_length: u32 = 0;
+                let mut token_session_id: u32 = 0;
+                let mut token_info_length: u32 = 0;
+                GetTokenInformation(
+                    token,
+                    TokenSessionId,
+                    Some(addr_of_mut!(token_session_id) as *mut c_void),
+                    std::mem::size_of::<u32>() as u32,
+                    &mut token_info_length,
+                )?;
+                if token_session_id != session_id {
+                    return Ok(false);
+                }
 
-            GetTokenInformation(
-                token,
-                TokenSessionId,
-                Some(addr_of_mut!(token_session_id) as *mut c_void),
-                std::mem::size_of::<u32>() as u32,
-                &mut token_info_length,
-            )?;
+                DuplicateTokenEx(
+                    token,
+                    desired_access,
+                    None,
+                    SecurityImpersonation,
+                    TokenImpersonation,
+                    h_token,
+                )?;
+                Ok(true)
+            })();
+            let _ = CloseHandle(token);
 
-            anyhow::ensure!(
-                token_session_id == session_id,
-                "TokenSessionId does not match the session_id"
-            );
-
-            DuplicateTokenEx(
-                token,
-                desired_access,
-                None,
-                SecurityImpersonation,
-                TokenImpersonation,
-                h_token,
-            )?;
+            if duplicated? {
+                found = true;
+                break;
+            }
         }
+        let _ = CloseHandle(snapshot);
+
+        anyhow::ensure!(found, "winlogon token for session {session_id} not found");
     }
 
     Ok(())

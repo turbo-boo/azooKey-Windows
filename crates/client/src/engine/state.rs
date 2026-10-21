@@ -1,9 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::{LazyLock, Mutex, MutexGuard},
-};
-
-use windows::{core::GUID, Win32::UI::TextServices::ITfContext};
+use std::sync::{LazyLock, Mutex, MutexGuard};
 
 use super::{input_mode::InputMode, ipc_service::IPCService};
 
@@ -11,8 +6,6 @@ use super::{input_mode::InputMode, ipc_service::IPCService};
 pub struct IMEState {
     pub ipc_service: Option<IPCService>,
     pub input_mode: InputMode,
-    pub cookies: HashMap<GUID, u32>,
-    pub context: Option<ITfContext>,
 }
 
 pub static IME_STATE: LazyLock<Mutex<IMEState>> = LazyLock::new(|| {
@@ -20,8 +13,6 @@ pub static IME_STATE: LazyLock<Mutex<IMEState>> = LazyLock::new(|| {
     Mutex::new(IMEState {
         ipc_service: None,
         input_mode: InputMode::default(),
-        cookies: HashMap::new(),
-        context: None,
     })
 });
 unsafe impl Sync for IMEState {}

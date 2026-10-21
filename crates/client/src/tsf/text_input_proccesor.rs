@@ -66,9 +66,7 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
                 &ITfThreadMgrEventSink::IID,
                 &text_service.this::<ITfThreadMgrEventSink>()?,
             )?;
-            IMEState::get()?
-                .cookies
-                .insert(ITfThreadMgrEventSink::IID, cookie);
+            text_service.thread_mgr_sink_cookie = Some(cookie);
         };
 
         // initialize text layout sink
@@ -148,7 +146,7 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
         // remove thread manager event sink
         tracing::debug!("UnadviseThreadMgrEventSink");
         unsafe {
-            if let Some(cookie) = IMEState::get()?.cookies.remove(&ITfThreadMgrEventSink::IID) {
+            if let Some(cookie) = text_service.thread_mgr_sink_cookie.take() {
                 thread_mgr.cast::<ITfSource>()?.UnadviseSink(cookie)?;
             }
         };

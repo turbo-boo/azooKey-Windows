@@ -8,8 +8,6 @@ use windows::{
 
 use anyhow::Result;
 
-use crate::engine::state::IMEState;
-
 use super::{factory::TextServiceFactory_Impl, text_service::TextService};
 
 impl ITfTextLayoutSink_Impl for TextServiceFactory_Impl {
@@ -47,38 +45,24 @@ impl ITfTextLayoutSink_Impl for TextServiceFactory_Impl {
 
 impl TextService {
     pub fn advise_text_layout_sink(&mut self, doc_mgr: ITfDocumentMgr) -> Result<()> {
-        if IMEState::get()?.context.is_some() {
-            self.unadvise_text_layout_sink()?;
-        }
+        self.unadvise_text_layout_sink()?;
 
         unsafe {
             let context = doc_mgr.GetTop()?;
-
-            IMEState::get()?.context = Some(context.clone());
-
             let cookie = context
                 .cast::<ITfSource>()?
                 .AdviseSink(&ITfTextLayoutSink::IID, &self.this::<ITfTextLayoutSink>()?)?;
-
-            IMEState::get()?
-                .cookies
-                .insert(ITfTextLayoutSink::IID, cookie);
-
-            Ok(())
+            self.layout_sink = Some((context, cookie));
         }
+
+        Ok(())
     }
 
     pub fn unadvise_text_layout_sink(&mut self) -> Result<()> {
-        unsafe {
-            let mut state = IMEState::get()?;
-
-            if let Some(context) = state.context.take() {
-                if let Some(cookie) = state.cookies.remove(&ITfTextLayoutSink::IID) {
-                    context.cast::<ITfSource>()?.UnadviseSink(cookie)?;
-                }
-            }
-
-            Ok(())
+        if let Some((context, cookie)) = self.layout_sink.take() {
+            unsafe { context.cast::<ITfSource>()?.UnadviseSink(cookie)? };
         }
+
+        Ok(())
     }
 }

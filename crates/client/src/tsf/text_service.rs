@@ -75,6 +75,10 @@ pub struct TextService {
     pub display_attribute_atom: HashMap<GUID, u32>,
     pub mode: InputMode,
     pub this: Option<ITfTextInputProcessor>,
+    // TSF activates one text service per UI thread, so sink registrations
+    // belong to the instance, not to process-wide state.
+    pub thread_mgr_sink_cookie: Option<u32>,
+    pub layout_sink: Option<(ITfContext, u32)>,
 }
 
 impl TextService {

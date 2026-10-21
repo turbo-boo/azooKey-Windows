@@ -94,6 +94,40 @@ fn candidate_parts(candidates: &Candidates, index: i32) -> Option<(String, Strin
     ))
 }
 
+/// What the composition shows after Backspace, given the fresh candidate list
+/// returned by the converter. Always starts from the first candidate and falls
+/// back to the remaining hiragana when there is none.
+#[derive(Debug, PartialEq)]
+struct RemovedTextView {
+    text: String,
+    sub_text: String,
+    corresponding_count: i32,
+    learnable: bool,
+    show_candidates: bool,
+    from_candidate: bool,
+}
+
+fn view_after_remove(candidates: &Candidates) -> RemovedTextView {
+    match candidate_parts(candidates, 0) {
+        Some((text, sub_text, corresponding_count)) => RemovedTextView {
+            text,
+            sub_text,
+            corresponding_count,
+            learnable: candidate_is_learnable(candidates, 0),
+            show_candidates: candidates.is_converted,
+            from_candidate: true,
+        },
+        None => RemovedTextView {
+            text: candidates.hiragana.clone(),
+            sub_text: String::new(),
+            corresponding_count: 0,
+            learnable: false,
+            show_candidates: false,
+            from_candidate: false,
+        },
+    }
+}
+
 fn next_selection_index(
     candidate_count: usize,
     current: i32,
@@ -861,34 +895,23 @@ impl TextServiceFactory {
                     // The converter returns a fresh candidate list, so the
                     // previous selection index does not apply to it.
                     selection_index = 0;
-                    let Some((text, sub_text, count)) =
-                        candidate_parts(&candidates, selection_index)
-                    else {
-                        corresponding_count = 0;
-                        preview = hiragana.clone();
-                        suffix.clear();
-                        raw_hiragana = hiragana;
-                        should_learn_candidate = false;
-                        self.set_text(&preview, "")?;
-                        ipc_service.hide_window()?;
-                        ipc_service.set_candidates(vec![])?;
-                        continue;
-                    };
-                    corresponding_count = count;
-
-                    raw_input = raw_input
-                        .chars()
-                        .take(corresponding_count as usize)
-                        .collect();
-                    preview = text.clone();
-                    suffix = sub_text.clone();
+                    let view = view_after_remove(&candidates);
+                    corresponding_count = view.corresponding_count;
+                    if view.from_candidate {
+                        raw_input = raw_input
+                            .chars()
+                            .take(corresponding_count as usize)
+                            .collect();
+                    }
+                    preview = view.text;
+                    suffix = view.sub_text;
                     raw_hiragana = hiragana;
-                    should_learn_candidate = candidate_is_learnable(&candidates, selection_index as usize);
+                    should_learn_candidate = view.learnable;
 
-                    self.set_text(&text, &sub_text)?;
-                    if candidates.is_converted {
+                    self.set_text(&preview, &suffix)?;
+                    if view.show_candidates {
                         ipc_service.set_candidates(candidates.texts.clone())?;
-                        ipc_service.set_selection(selection_index as i32)?;
+                        ipc_service.set_selection(selection_index)?;
                         ipc_service.show_window()?;
                     } else {
                         ipc_service.hide_window()?;
@@ -1064,7 +1087,7 @@ impl TextServiceFactory {
 mod tests {
     use super::{
         candidate_is_learnable, candidate_parts, conversion_key_action, is_alt_backquote_key,
-        next_selection_index,
+        next_selection_index, view_after_remove,
     };
     use crate::engine::{
         client_action::{ClientAction, SetSelectionType},
@@ -1145,5 +1168,38 @@ mod tests {
             ..raw
         };
         assert!(candidate_is_learnable(&converted, 0));
+    }
+
+    #[test]
+    fn backspace_shows_first_candidate_of_the_fresh_list() {
+        // Live conversion off: after Backspace the converter returns only the
+        // unconverted text, even if the 3rd candidate was selected before.
+        let after_remove = Candidates {
+            texts: vec!["きょう".to_string()],
+            sub_texts: vec![String::new()],
+            hiragana: "きょう".to_string(),
+            corresponding_count: vec![3],
+            candidate_ids: vec![-1],
+            is_converted: false,
+        };
+
+        let view = view_after_remove(&after_remove);
+        assert_eq!(view.text, "きょう");
+        assert_eq!(view.corresponding_count, 3);
+        assert!(!view.learnable);
+        assert!(!view.show_candidates);
+    }
+
+    #[test]
+    fn backspace_without_candidates_keeps_remaining_hiragana_visible() {
+        let after_remove = Candidates {
+            hiragana: "きょ".to_string(),
+            ..Candidates::default()
+        };
+
+        let view = view_after_remove(&after_remove);
+        assert_eq!(view.text, "きょ");
+        assert_eq!(view.sub_text, "");
+        assert!(!view.from_candidate);
     }
 }

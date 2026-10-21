@@ -22,6 +22,7 @@ use tonic::transport::{Channel, Endpoint};
 use tower::service_fn;
 
 mod pipe_acl;
+mod wakeup_probe;
 
 const SERVER_PIPE: &str = r"\\.\pipe\azookey_server";
 const UI_PIPE: &str = r"\\.\pipe\azookey_ui";
@@ -216,9 +217,14 @@ async fn main() -> Result<()> {
     let args = parse_args()?;
 
     if let Some(dir) = &args.start {
+        use std::os::windows::process::CommandExt as _;
+        // The startup task runs launcher.exe at Task Scheduler priority 7,
+        // i.e. BELOW_NORMAL_PRIORITY_CLASS; start it the same way.
+        const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
         let launcher = dir.join("launcher.exe");
         std::process::Command::new(&launcher)
             .current_dir(dir)
+            .creation_flags(BELOW_NORMAL_PRIORITY_CLASS)
             .spawn()
             .with_context(|| format!("failed to start {}", launcher.display()))?;
     }
@@ -233,7 +239,14 @@ async fn main() -> Result<()> {
             failures.push(format!("{pipe} ACL: {error:#}"));
         }
     }
-    if let Err(error) = check_converter(&mut AzookeyServiceClient::new(server), &args.keys).await {
+    let idle = wakeup_probe::WakeupProbe::start();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    report("wakeup lateness (idle)", &idle.finish());
+
+    let busy = wakeup_probe::WakeupProbe::start();
+    let converter = check_converter(&mut AzookeyServiceClient::new(server), &args.keys).await;
+    report("wakeup lateness (converting)", &busy.finish());
+    if let Err(error) = converter {
         failures.push(format!("converter: {error:#}"));
     }
     if let Err(error) = check_window(&mut WindowServiceClient::new(window)).await {

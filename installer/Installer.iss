@@ -74,6 +74,10 @@ Filename: "{sys}\schtasks.exe"; \
 Type: files; Name: "{app}\launch.vbs"
 
 [Code]
+const
+  TASK_CREATE_OR_UPDATE = 6;
+  TASK_LOGON_GROUP = 4;
+
 function InitializeSetup: Boolean;
 begin
   ExtractTemporaryFile('Azookey_0.1.0_x64-setup.exe');
@@ -126,13 +130,18 @@ begin
     StringChangeEx(Lines[I], Placeholder, Value, True);
 end;
 
-procedure UpdateTaskXml();
+// Registers the startup task through the Task Scheduler COM API. The XML is
+// passed as a string: schtasks /XML reads the file as UTF-16 and rejects a
+// UTF-8 file or declaration ("The task XML is malformed").
+procedure RegisterStartupTask();
 var
   TaskXmlPath: String;
   TaskXmlLines: TArrayOfString;
-  LauncherPath: String;
-  AppPath: String;
-  ResultCode: Integer;
+  TaskXml: String;
+  I: Integer;
+  Service: Variant;
+  Folder: Variant;
+  Task: Variant;
 begin
   ExtractTemporaryFile('Azookey Startup.xml');
   TaskXmlPath := ExpandConstant('{tmp}\Azookey Startup.xml');
@@ -140,41 +149,23 @@ begin
   if not LoadStringsFromFile(TaskXmlPath, TaskXmlLines) then
     RaiseException('Failed to read the startup task template.');
 
-  LauncherPath := EscapeXmlText(ExpandConstant('{app}\launcher.exe'));
-  AppPath := EscapeXmlText(ExpandConstant('{app}'));
-  ReplaceTaskPlaceholder(TaskXmlLines, 'PATH_TO_LAUNCHER', LauncherPath);
-  ReplaceTaskPlaceholder(TaskXmlLines, 'PATH_TO_APP', AppPath);
+  ReplaceTaskPlaceholder(TaskXmlLines, 'PATH_TO_LAUNCHER',
+    EscapeXmlText(ExpandConstant('{app}\launcher.exe')));
+  ReplaceTaskPlaceholder(TaskXmlLines, 'PATH_TO_APP',
+    EscapeXmlText(ExpandConstant('{app}')));
 
-  if not SaveStringsToUTF8File(TaskXmlPath, TaskXmlLines, False) then
-    RaiseException('Failed to write the startup task XML.');
+  TaskXml := '';
+  for I := 0 to GetArrayLength(TaskXmlLines) - 1 do
+    TaskXml := TaskXml + TaskXmlLines[I] + #13#10;
 
-  if not ShellExec(
-    '',
-    ExpandConstant('{sys}\schtasks.exe'),
-    '/Create /F /TN "Azookey Startup" /XML "' + TaskXmlPath + '"',
-    ExpandConstant('{app}'),
-    SW_HIDE,
-    ewWaitUntilTerminated,
-    ResultCode
-  ) then
-    RaiseException('Failed to launch schtasks while creating the startup task.');
-
-  if ResultCode <> 0 then
-    RaiseException(Format('Failed to create the startup task (exit code %d).', [ResultCode]));
-
-  if not ShellExec(
-    '',
-    ExpandConstant('{sys}\schtasks.exe'),
-    '/Run /TN "Azookey Startup"',
-    ExpandConstant('{app}'),
-    SW_HIDE,
-    ewWaitUntilTerminated,
-    ResultCode
-  ) then
-    RaiseException('Failed to launch schtasks while starting Azookey.');
-
-  if ResultCode <> 0 then
-    RaiseException(Format('Failed to start the startup task (exit code %d).', [ResultCode]));
+  // Optional COM arguments must be VT_EMPTY (Unassigned); RegisterTask
+  // rejects VT_NULL.
+  Service := CreateOleObject('Schedule.Service');
+  Service.Connect();
+  Folder := Service.GetFolder('\');
+  Task := Folder.RegisterTask('Azookey Startup', TaskXml,
+    TASK_CREATE_OR_UPDATE, Unassigned, Unassigned, TASK_LOGON_GROUP);
+  Task.Run(Unassigned);
 end;
 
 procedure UninstallAzookey();
@@ -310,7 +301,7 @@ begin
   begin
     // Remove the legacy script before replacing the scheduled task.
     DeleteFile(ExpandConstant('{app}\launch.vbs'));
-    UpdateTaskXml();
+    RegisterStartupTask();
   end;
 end;
 

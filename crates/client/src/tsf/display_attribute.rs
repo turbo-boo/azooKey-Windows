@@ -4,9 +4,13 @@ use std::{
 };
 use windows::{
     core::{implement, BSTR, GUID},
-    Win32::UI::TextServices::{
-        IEnumTfDisplayAttributeInfo, IEnumTfDisplayAttributeInfo_Impl, ITfDisplayAttributeInfo,
-        ITfDisplayAttributeInfo_Impl, ITfDisplayAttributeProvider_Impl, TF_DISPLAYATTRIBUTE,
+    Win32::{
+        Foundation::S_FALSE,
+        UI::TextServices::{
+            IEnumTfDisplayAttributeInfo, IEnumTfDisplayAttributeInfo_Impl,
+            ITfDisplayAttributeInfo, ITfDisplayAttributeInfo_Impl,
+            ITfDisplayAttributeProvider_Impl, TF_DISPLAYATTRIBUTE,
+        },
     },
 };
 
@@ -121,35 +125,34 @@ impl IEnumTfDisplayAttributeInfo_Impl for EnumDisplayAttributeInfo_Impl {
         Ok(clone.into())
     }
 
-    #[macros::anyhow]
+    // Implemented without #[macros::anyhow]: the end of the enumeration must be
+    // reported as S_FALSE, which callers passing a NULL pcfetched rely on.
     fn Next(
         &self,
         ulcount: u32,
         rginfo: *mut Option<ITfDisplayAttributeInfo>,
         pcfetched: *mut u32,
-    ) -> Result<()> {
-        unsafe {
-            if ulcount == 0 {
-                return Ok(());
-            }
+    ) -> windows::core::Result<()> {
+        let mut fetched = 0;
+        let mut index = self.index.load(Relaxed);
 
-            let mut fetched = 0;
-            let mut index = self.index.load(Relaxed);
-
-            while fetched < ulcount && index < self.attributes.len() {
-                let attribute = match self.attributes.get(index).cloned() {
-                    Some(attr) => attr,
-                    None => anyhow::bail!("Display attribute not found"),
-                };
-                *rginfo = Some(attribute.into());
-                fetched += 1;
-                index += 1;
-            }
-
-            self.index.store(index, Relaxed);
-            *pcfetched = fetched;
+        while fetched < ulcount && index < self.attributes.len() {
+            let attribute = self.attributes[index].clone();
+            unsafe { rginfo.add(fetched as usize).write(Some(attribute.into())) };
+            fetched += 1;
+            index += 1;
         }
-        Ok(())
+
+        self.index.store(index, Relaxed);
+        if !pcfetched.is_null() {
+            unsafe { *pcfetched = fetched };
+        }
+
+        if fetched == ulcount {
+            Ok(())
+        } else {
+            Err(S_FALSE.into())
+        }
     }
 
     #[macros::anyhow]

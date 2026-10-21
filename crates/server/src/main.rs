@@ -440,7 +440,10 @@ impl AzookeyService for MyAzookeyService {
     }
 }
 
-#[tokio::main]
+// The converter keeps a single global composition and is not thread-safe, and
+// its entry points are @MainActor. A current-thread runtime runs every handler
+// on the main thread, one at a time; handlers do not await between FFI calls.
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("AzookeyServer started");
     // get executable directory

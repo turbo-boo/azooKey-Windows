@@ -18,7 +18,12 @@ AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
-DefaultDirName={userappdata}\{#MyAppName}
+; Program Files: the startup task runs launcher.exe with the highest available
+; privileges, so its binaries must not be writable by the user. Settings and
+; learning data stay in %APPDATA%\Azookey.
+DefaultDirName={autopf}\{#MyAppName}
+; Older versions installed into %APPDATA%\Azookey; do not reuse that directory.
+UsePreviousAppDir=no
 ; "ArchitecturesAllowed=x64compatible" specifies that Setup cannot run
 ; on anything but x64 and Windows 11 on Arm.
 ArchitecturesAllowed=x64compatible
@@ -51,11 +56,11 @@ Source: "./Azookey Startup.xml"; Flags: dontcopy noencryption
 
 [Run]
 Filename: "icacls"; \
-  Parameters: "{app}\azookey.dll /grant ""*S-1-15-2-1:(RX)"""; \
+  Parameters: """{app}\azookey.dll"" /grant ""*S-1-15-2-1:(RX)"""; \
   Description: "Grant Permission"; \
   Flags: runhidden postinstall runascurrentuser
 Filename: "icacls"; \
-  Parameters: "{app}\azookey32.dll /grant ""*S-1-15-2-1:(RX)"""; \
+  Parameters: """{app}\azookey32.dll"" /grant ""*S-1-15-2-1:(RX)"""; \
   Description: "Grant Permission"; \
   Flags: runhidden postinstall runascurrentuser
 
@@ -208,11 +213,95 @@ begin
     SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
+function PreviousInstallDir(): String;
+begin
+  if not RegQueryStringValue(HKLM,
+    'Software\Microsoft\Windows\CurrentVersion\Uninstall\{80B746D4-D74D-4345-8F81-47E06BCAB515}_is1',
+    'Inno Setup: App Path', Result) then
+    Result := '';
+end;
+
+procedure DeleteOrScheduleFile(Path: String);
+begin
+  if FileExists(Path) and not DeleteFile(Path) then
+    RestartReplace(Path, '');
+end;
+
+procedure DeleteLegacyFiles(Dir: String; Pattern: String);
+var
+  FindRec: TFindRec;
+begin
+  if FindFirst(Dir + '\' + Pattern, FindRec) then
+  begin
+    try
+      repeat
+        if FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY = 0 then
+          DeleteOrScheduleFile(Dir + '\' + FindRec.Name);
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
+end;
+
+// Removes the program files of an install in another directory. Always
+// unregisters the IME and deletes Azookey's own binaries by name. The
+// wildcard/subdirectory cleanup (Swift runtime DLLs, llama backends,
+// dictionaries) runs only for the old default %APPDATA%\Azookey, which belongs
+// to Azookey alone; a custom directory may contain other applications' files.
+// %APPDATA%\Azookey also holds settings.json and the learning memory, which
+// are kept.
+procedure RemoveLegacyInstall(Dir: String);
+var
+  ResultCode: Integer;
+begin
+  Exec(ExpandConstant('{sys}\regsvr32.exe'), '/u /s "' + Dir + '\azookey.dll"', '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{syswow64}\regsvr32.exe'), '/u /s "' + Dir + '\azookey32.dll"', '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  DeleteOrScheduleFile(Dir + '\azookey.dll');
+  DeleteOrScheduleFile(Dir + '\azookey32.dll');
+  DeleteOrScheduleFile(Dir + '\azookey_windows.dll');
+  DeleteOrScheduleFile(Dir + '\azookey-server.dll');
+  DeleteOrScheduleFile(Dir + '\azookey-server.exe');
+  DeleteOrScheduleFile(Dir + '\launcher.exe');
+  DeleteOrScheduleFile(Dir + '\ui.exe');
+  DeleteOrScheduleFile(Dir + '\zenz.gguf');
+  DeleteOrScheduleFile(Dir + '\launch.vbs');
+  DeleteOrScheduleFile(Dir + '\unins000.exe');
+  DeleteOrScheduleFile(Dir + '\unins000.dat');
+  DeleteOrScheduleFile(Dir + '\unins000.msg');
+
+  if CompareText(Dir, ExpandConstant('{userappdata}\{#MyAppName}')) <> 0 then
+    Exit;
+
+  DeleteLegacyFiles(Dir, '*.exe');
+  DeleteLegacyFiles(Dir, '*.dll');
+  DelTree(Dir + '\x86', True, True, True);
+  DelTree(Dir + '\llama_cpu', True, True, True);
+  DelTree(Dir + '\llama_cuda', True, True, True);
+  DelTree(Dir + '\llama_vulkan', True, True, True);
+  DelTree(Dir + '\Dictionary', True, True, True);
+  DelTree(Dir + '\EmojiDictionary', True, True, True);
+end;
+
 <event('PrepareToInstall')>
 function Azookey_PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  AppDir: String;
+  OldDir: String;
 begin
   Result := '';
-  StopAzookeyProcesses(ExpandConstant('{app}'));
+  AppDir := RemoveBackslashUnlessRoot(ExpandConstant('{app}'));
+  StopAzookeyProcesses(AppDir);
+
+  OldDir := RemoveBackslashUnlessRoot(PreviousInstallDir());
+  if (OldDir <> '') and (CompareText(OldDir, AppDir) <> 0) and DirExists(OldDir) then
+  begin
+    StopAzookeyProcesses(OldDir);
+    RemoveLegacyInstall(OldDir);
+  end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

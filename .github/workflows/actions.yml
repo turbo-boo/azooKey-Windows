@@ -174,7 +174,9 @@ jobs:
         # next to the binaries (e.g. WebView2 user data).
         $dir = "C:\AzookeySmoke"
         Copy-Item -Recurse build $dir
-        icacls $dir /deny "*S-1-1-0:(OI)(CI)(W)" | Out-Null
+        # Not (W): generic write includes SYNCHRONIZE/READ_CONTROL, which
+        # would also block running the executables.
+        icacls $dir /deny "*S-1-1-0:(OI)(CI)(WD,AD,WEA,WA)" | Out-Null
         ./target/release/azookey-smoke.exe --start $dir
         if ($LASTEXITCODE -ne 0) { throw "smoke test failed" }
 

@@ -2,9 +2,18 @@
 
 use shared::AppConfig;
 use std::io::{BufRead, BufReader};
+use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::{env, thread};
+use windows::Win32::{
+    Foundation::HANDLE,
+    System::Threading::{
+        ProcessPowerThrottling, SetProcessInformation, ABOVE_NORMAL_PRIORITY_CLASS,
+        CREATE_NO_WINDOW, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+    },
+};
 
 fn file_on_search_path(filename: &str) -> bool {
     env::var("PATH")
@@ -55,17 +64,39 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn start_process(base_dir: &std::path::Path, exe: &str, prefix: &str) -> Option<Child> {
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+// The converter and candidate window are windowless background processes, so
+// Windows neither boosts them like the foreground app nor exempts them from
+// EcoQoS. Every keystroke waits on them synchronously; under CPU contention
+// that turns into visible input lag.
+fn opt_out_of_power_throttling(child: &Child) {
+    let state = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: 0,
+    };
+    let result = unsafe {
+        SetProcessInformation(
+            HANDLE(child.as_raw_handle()),
+            ProcessPowerThrottling,
+            std::ptr::from_ref(&state).cast(),
+            size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        )
+    };
+    if let Err(error) = result {
+        eprintln!("Failed to disable power throttling: {error}");
+    }
+}
 
+fn start_process(base_dir: &std::path::Path, exe: &str, prefix: &str) -> Option<Child> {
     let executable = base_dir.join(exe);
     let mut child = Command::new(&executable)
         .current_dir(base_dir)
-        .creation_flags(CREATE_NO_WINDOW)
+        .creation_flags((CREATE_NO_WINDOW | ABOVE_NORMAL_PRIORITY_CLASS).0)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap_or_else(|error| panic!("Failed to start {}: {error}", executable.display()));
+    opt_out_of_power_throttling(&child);
 
     let stdout = child.stdout.take().expect("Failed to capture stdout");
     let stdout_reader = BufReader::new(stdout);

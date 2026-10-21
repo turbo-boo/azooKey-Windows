@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    engine::{ipc_service, state::IMEState},
+    engine::state::IMEState,
     globals::{DllModule, GUID_DISPLAY_ATTRIBUTE},
 };
 
@@ -31,15 +31,11 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
         let mut dll_instance = DllModule::get()?;
         dll_instance.add_ref();
 
-        // initialize ipc_service
-        if let Ok(mut ipc_service) = ipc_service::IPCService::new() {
-            ipc_service.append_text("".to_string())?;
-            IMEState::get()?.ipc_service = Some(ipc_service);
-        } else {
-            // Activate() should not return an error
-            // if Activate() returns an error, the icon of the previously activated TextService will be displayed, which may confuse the user
-            tracing::error!("Failed to initialize IPC service");
-            return Ok(());
+        // Connect eagerly when possible. If the server is not up yet (e.g. right
+        // after logon), keep activating: IMEState::ipc_service() reconnects on
+        // the next key, and keys pass through to the app until then.
+        if let Err(error) = IMEState::ipc_service() {
+            tracing::warn!("IPC service is not available yet: {error:?}");
         }
 
         let mut text_service = self.borrow_mut()?;

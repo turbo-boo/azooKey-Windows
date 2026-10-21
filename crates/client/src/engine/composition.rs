@@ -24,7 +24,7 @@ use windows::Win32::{
     },
 };
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 #[derive(Default, Clone, PartialEq, Debug)]
 pub enum CompositionState {
@@ -152,6 +152,12 @@ impl TextServiceFactory {
         if context.is_none() {
             return Ok(None);
         };
+
+        // Without the server nothing can be converted; let the key reach the app.
+        if let Err(error) = IMEState::ipc_service() {
+            tracing::debug!("Passing key through, IPC service unavailable: {error:?}");
+            return Ok(None);
+        }
 
         let ctrl_pressed = is_ctrl_pressed();
         let ctrl_space = ctrl_pressed && wparam.0 == 0x20;
@@ -547,10 +553,7 @@ impl TextServiceFactory {
         let mut candidates = composition.candidates.clone();
         let mut should_learn_candidate = composition.should_learn_candidate;
         let mut selection_index = composition.selection_index;
-        let mut ipc_service = IMEState::get()?
-            .ipc_service
-            .clone()
-            .context("ipc_service is None")?;
+        let mut ipc_service = IMEState::ipc_service()?;
         let mut transition = transition;
 
         // The text preceding the composition only changes when a composition

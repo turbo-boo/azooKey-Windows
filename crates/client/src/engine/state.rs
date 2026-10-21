@@ -25,4 +25,18 @@ impl IMEState {
             Err(e) => anyhow::bail!("Failed to lock state: {:?}", e),
         }
     }
+
+    /// Returns the server connection, connecting first if the server was not
+    /// reachable when the text service was activated (e.g. right after logon).
+    pub fn ipc_service() -> anyhow::Result<IPCService> {
+        let mut state = Self::get()?;
+        if let Some(ipc_service) = &state.ipc_service {
+            return Ok(ipc_service.clone());
+        }
+
+        let mut ipc_service = IPCService::new()?;
+        ipc_service.append_text("".to_string())?;
+        state.ipc_service = Some(ipc_service.clone());
+        Ok(ipc_service)
+    }
 }

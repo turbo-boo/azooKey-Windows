@@ -389,6 +389,29 @@ func to_list_pointer(_ list: [FFICandidate]) -> UnsafeMutablePointer<UnsafeMutab
     return pointer
 }
 
+// Every string and candidate list returned across the FFI is owned by the
+// caller and must be released with these functions.
+@_silgen_name("FreeString")
+public func free_string(ptr: UnsafeMutablePointer<CChar>?) {
+    free(ptr)
+}
+
+@_silgen_name("FreeCandidates")
+public func free_candidates(
+    list: UnsafeMutablePointer<UnsafeMutablePointer<FFICandidate>?>?,
+    length: Int32
+) {
+    guard let list else { return }
+    for i in 0..<Int(length) {
+        guard let item = list[i] else { continue }
+        free(item.pointee.text)
+        free(item.pointee.subtext)
+        free(item.pointee.hiragana)
+        item.deallocate()
+    }
+    list.deallocate()
+}
+
 @_silgen_name("GetComposedText")
 @MainActor public func get_composed_text(lengthPtr: UnsafeMutablePointer<Int32>) -> UnsafeMutablePointer<UnsafeMutablePointer<FFICandidate>?> {
     let hiragana = composingText.convertTarget

@@ -52,6 +52,41 @@ unsafe extern "C" {
     fn CommitPrediction(predictionIndex: c_int);
     fn ClearPostCompositionPredictions();
     fn LoadConfig();
+    fn FreeString(ptr: *mut c_char);
+    fn FreeCandidates(list: *mut *mut FFICandidate, length: c_int);
+}
+
+/// Copies a string returned by the converter and releases the original.
+unsafe fn take_string(ptr: *mut c_char) -> String {
+    let text = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+    FreeString(ptr);
+    text
+}
+
+/// Copies a candidate list returned by the converter and releases the original.
+unsafe fn take_candidates(list: *mut *mut FFICandidate, length: c_int) -> Vec<FFICandidateData> {
+    let candidates = (0..length.max(0) as usize)
+        .map(|index| {
+            let candidate = &**list.add(index);
+            FFICandidateData {
+                text: CStr::from_ptr(candidate.text).to_string_lossy().into_owned(),
+                subtext: CStr::from_ptr(candidate.subtext)
+                    .to_string_lossy()
+                    .into_owned(),
+                corresponding_count: candidate.corresponding_count,
+                candidate_index: candidate.candidate_index,
+            }
+        })
+        .collect();
+    FreeCandidates(list, length);
+    candidates
+}
+
+struct FFICandidateData {
+    text: String,
+    subtext: String,
+    corresponding_count: i32,
+    candidate_index: i32,
 }
 
 fn initialize(path: &str) {
@@ -68,10 +103,8 @@ fn add_text(input: &str) -> RawComposingText {
 
         let result = AppendText(input.as_ptr(), &mut cursor);
 
-        let text = CStr::from_ptr(&*result as *const c_char).to_str().unwrap();
-
         RawComposingText {
-            text: text.to_string(),
+            text: take_string(result),
             cursor,
         }
     }
@@ -85,10 +118,8 @@ fn move_cursor(offset: i8) -> RawComposingText {
 
         let result = MoveCursor(offset, &mut cursor);
 
-        let text = CStr::from_ptr(&*result as *const c_char).to_str().unwrap();
-
         RawComposingText {
-            text: text.to_string(),
+            text: take_string(result),
             cursor,
         }
     }
@@ -100,10 +131,8 @@ fn remove_text() -> RawComposingText {
 
         let result = RemoveText(&mut cursor);
 
-        let text = CStr::from_ptr(&*result as *const c_char).to_str().unwrap();
-
         RawComposingText {
-            text: text.to_string(),
+            text: take_string(result),
             cursor,
         }
     }
@@ -116,41 +145,26 @@ fn clear_text() {
 }
 
 fn get_composed_text() -> Vec<Suggestion> {
-    unsafe {
+    let candidates = unsafe {
         let mut length: c_int = 0;
         let result = GetComposedText(&mut length);
-        let mut suggestions = Vec::with_capacity(length as usize);
+        take_candidates(result, length)
+    };
 
-        for index in 0..length as usize {
-            let candidate = (**result.add(index)).clone();
-            let text = CStr::from_ptr(candidate.text)
-                .to_string_lossy()
-                .into_owned();
-            let subtext = CStr::from_ptr(candidate.subtext)
-                .to_string_lossy()
-                .into_owned();
-            let corresponding_count = candidate.corresponding_count;
-            let candidate_id = candidate.candidate_index;
-
-            let suggestion = Suggestion {
-                text,
-                subtext,
-                corresponding_count,
-                candidate_id,
-            };
-
-            // check if suggestions have the same text
-            if suggestions
-                .iter()
-                .any(|s: &Suggestion| s.text == suggestion.text)
-            {
-                continue;
-            }
-            suggestions.push(suggestion);
+    let mut suggestions: Vec<Suggestion> = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        // check if suggestions have the same text
+        if suggestions.iter().any(|s| s.text == candidate.text) {
+            continue;
         }
-
-        suggestions
+        suggestions.push(Suggestion {
+            text: candidate.text,
+            subtext: candidate.subtext,
+            corresponding_count: candidate.corresponding_count,
+            candidate_id: candidate.candidate_index,
+        });
     }
+    suggestions
 }
 
 fn refresh_runtime_config() {
@@ -184,20 +198,19 @@ fn composing_text_response(raw: RawComposingText, force_conversion: bool) -> Com
 }
 
 fn get_post_composition_predictions() -> Vec<PredictionSuggestion> {
-    unsafe {
+    let candidates = unsafe {
         let mut length: c_int = 0;
         let result = GetPostCompositionPredictions(&mut length);
-        let mut suggestions = Vec::with_capacity(length as usize);
+        take_candidates(result, length)
+    };
 
-        for index in 0..length as usize {
-            let candidate = (**result.add(index)).clone();
-            suggestions.push(PredictionSuggestion {
-                text: CStr::from_ptr(candidate.text).to_string_lossy().into_owned(),
-                prediction_id: candidate.candidate_index,
-            });
-        }
-        suggestions
-    }
+    candidates
+        .into_iter()
+        .map(|candidate| PredictionSuggestion {
+            text: candidate.text,
+            prediction_id: candidate.candidate_index,
+        })
+        .collect()
 }
 
 fn commit_prediction(prediction_id: i32) -> Vec<PredictionSuggestion> {
@@ -218,10 +231,8 @@ fn shrink_text(offset: i8) -> RawComposingText {
         let offset = c_int::from(offset);
         let result = ShrinkText(offset);
 
-        let text = CStr::from_ptr(&*result as *const c_char).to_str().unwrap();
-
         RawComposingText {
-            text: text.to_string(),
+            text: take_string(result),
             cursor: 0,
         }
     }

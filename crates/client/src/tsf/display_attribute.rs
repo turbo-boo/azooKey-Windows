@@ -168,3 +168,57 @@ impl IEnumTfDisplayAttributeInfo_Impl for EnumDisplayAttributeInfo_Impl {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::EnumDisplayAttributeInfo;
+    use windows::{
+        core::{Interface as _, HRESULT},
+        Win32::{
+            Foundation::{S_FALSE, S_OK},
+            UI::TextServices::{IEnumTfDisplayAttributeInfo, ITfDisplayAttributeInfo},
+        },
+    };
+
+    fn next(
+        enumerator: &IEnumTfDisplayAttributeInfo,
+        slots: &mut [Option<ITfDisplayAttributeInfo>],
+        fetched: *mut u32,
+    ) -> HRESULT {
+        // Call through the vtable: the safe wrapper folds S_FALSE into Ok.
+        unsafe {
+            (enumerator.vtable().Next)(
+                enumerator.as_raw(),
+                slots.len() as u32,
+                slots.as_mut_ptr().cast(),
+                fetched,
+            )
+        }
+    }
+
+    #[test]
+    fn next_accepts_null_fetched_pointer() {
+        let enumerator: IEnumTfDisplayAttributeInfo = EnumDisplayAttributeInfo::new().into();
+        let mut slot = [None];
+
+        assert_eq!(next(&enumerator, &mut slot, std::ptr::null_mut()), S_OK);
+        assert!(slot[0].is_some());
+        // exhausted: no element, still no write through the NULL pointer
+        let mut slot = [None];
+        assert_eq!(next(&enumerator, &mut slot, std::ptr::null_mut()), S_FALSE);
+        assert!(slot[0].is_none());
+    }
+
+    #[test]
+    fn next_fills_each_slot_and_reports_short_reads() {
+        let enumerator: IEnumTfDisplayAttributeInfo = EnumDisplayAttributeInfo::new().into();
+        let available = EnumDisplayAttributeInfo::new().attributes.len();
+        let mut slots = vec![None; available + 1];
+        let mut fetched = u32::MAX;
+
+        assert_eq!(next(&enumerator, &mut slots, &mut fetched), S_FALSE);
+        assert_eq!(fetched as usize, available);
+        assert!(slots[..available].iter().all(Option::is_some));
+        assert!(slots[available].is_none());
+    }
+}

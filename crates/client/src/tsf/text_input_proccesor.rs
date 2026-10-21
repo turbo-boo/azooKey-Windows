@@ -108,59 +108,89 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
     fn Deactivate(&self) -> Result<()> {
         tracing::debug!("Deactivated");
 
-        // remove reference to the dll instance
-        let mut dll_instance = DllModule::get()?;
-        dll_instance.release();
-
-        {
-            let text_service = self.borrow()?;
-            let thread_mgr = text_service.thread_mgr()?;
-
-            // end composition
-            self.end_composition()?;
-
-            // persist learning memory when the text service is deactivated
-            if let Some(mut ipc_service) = IMEState::get()?.ipc_service.clone() {
-                ipc_service.flush_learning()?;
-            }
-
-            // remove key event sink
-            tracing::debug!("UnadviseKeyEventSink");
-            unsafe {
-                thread_mgr
-                    .cast::<ITfKeystrokeMgr>()?
-                    .UnadviseKeyEventSink(text_service.tid)?;
-            };
-
-            tracing::debug!("Remove langbar");
-            unsafe {
-                thread_mgr
-                    .cast::<ITfLangBarItemMgr>()?
-                    .RemoveItem(&text_service.this::<ITfLangBarItemButton>()?)
-            }?;
-        }
-
-        let mut text_service = self.borrow_mut()?;
-        let thread_mgr = text_service.thread_mgr()?;
-
-        // remove thread manager event sink
-        tracing::debug!("UnadviseThreadMgrEventSink");
-        unsafe {
-            if let Some(cookie) = text_service.thread_mgr_sink_cookie.take() {
-                thread_mgr.cast::<ITfSource>()?.UnadviseSink(cookie)?;
+        // Every registration must be removed even if an earlier step fails,
+        // e.g. when the server has already exited.
+        let mut failed = false;
+        let mut check = |step: &str, result: Result<()>| {
+            if let Err(error) = result {
+                tracing::error!("Deactivate: {step} failed: {error:?}");
+                failed = true;
             }
         };
 
-        // remove text layout sink
+        check("end composition", self.end_composition());
+
+        // persist learning memory when the text service is deactivated
+        check(
+            "flush learning",
+            (|| {
+                let ipc_service = IMEState::get()?.ipc_service.clone();
+                if let Some(mut ipc_service) = ipc_service {
+                    ipc_service.flush_learning()?;
+                }
+                Ok(())
+            })(),
+        );
+
+        let mut text_service = self.borrow_mut()?;
+        if let Some(thread_mgr) = text_service.thread_mgr.clone() {
+            tracing::debug!("UnadviseKeyEventSink");
+            check(
+                "unadvise key event sink",
+                (|| unsafe {
+                    thread_mgr
+                        .cast::<ITfKeystrokeMgr>()?
+                        .UnadviseKeyEventSink(text_service.tid)?;
+                    Ok(())
+                })(),
+            );
+
+            tracing::debug!("Remove langbar");
+            check(
+                "remove langbar item",
+                (|| unsafe {
+                    thread_mgr
+                        .cast::<ITfLangBarItemMgr>()?
+                        .RemoveItem(&text_service.this::<ITfLangBarItemButton>()?)?;
+                    Ok(())
+                })(),
+            );
+
+            tracing::debug!("UnadviseThreadMgrEventSink");
+            if let Some(cookie) = text_service.thread_mgr_sink_cookie.take() {
+                check(
+                    "unadvise thread manager event sink",
+                    (|| unsafe {
+                        thread_mgr.cast::<ITfSource>()?.UnadviseSink(cookie)?;
+                        Ok(())
+                    })(),
+                );
+            }
+        }
+
         tracing::debug!("UnadviseTextLayoutSink");
-        text_service.unadvise_text_layout_sink()?;
+        check(
+            "unadvise text layout sink",
+            text_service.unadvise_text_layout_sink(),
+        );
 
-        // clear display attribute
         text_service.display_attribute_atom.clear();
-
         text_service.tid = 0;
         text_service.thread_mgr = None;
+        text_service.thread_mgr_sink_cookie = None;
+        drop(text_service);
 
+        // remove reference to the dll instance
+        check(
+            "release dll reference",
+            DllModule::get().map(|mut dll_instance| {
+                dll_instance.release();
+            }),
+        );
+
+        if failed {
+            anyhow::bail!("Deactivate completed with errors");
+        }
         tracing::debug!("Deactivate success");
 
         Ok(())

@@ -12,15 +12,27 @@ use std::path::PathBuf;
 #[derive(Debug)]
 pub struct AppState {
     settings: Mutex<AppConfig>,
-    ipc: ipc::IPCService,
+    // Connected on demand: the settings window must open even when the
+    // converter server is not running (e.g. to fix the backend setting).
+    ipc: Mutex<Option<ipc::IPCService>>,
 }
 
 impl AppState {
     fn new() -> Self {
         AppState {
             settings: Mutex::new(AppConfig::new()),
-            ipc: ipc::IPCService::new().unwrap(),
+            ipc: Mutex::new(None),
         }
+    }
+
+    fn ipc(&self) -> anyhow::Result<ipc::IPCService> {
+        let mut ipc = self.ipc.lock();
+        if let Some(service) = ipc.as_ref() {
+            return Ok(service.clone());
+        }
+        let service = ipc::IPCService::new()?;
+        *ipc = Some(service.clone());
+        Ok(service)
     }
 }
 
@@ -36,17 +48,24 @@ fn get_config(state: tauri::State<AppState>) -> AppConfig {
 }
 
 #[tauri::command]
-fn update_config(state: tauri::State<AppState>, new_config: AppConfig) {
+fn update_config(state: tauri::State<AppState>, new_config: AppConfig) -> Result<(), String> {
     let mut config = state.settings.lock();
     *config = new_config;
     config.write();
 
-    state.ipc.clone().update_config().unwrap();
+    // A server that is not running reads the saved file when it starts.
+    let Ok(mut ipc) = state.ipc() else {
+        return Ok(());
+    };
+    ipc.update_config().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn reset_learning(state: tauri::State<AppState>) {
-    state.ipc.clone().reset_learning().unwrap();
+fn reset_learning(state: tauri::State<AppState>) -> Result<(), String> {
+    state
+        .ipc()
+        .and_then(|mut ipc| ipc.reset_learning())
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

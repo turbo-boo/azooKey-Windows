@@ -166,6 +166,18 @@ jobs:
           throw "launcher.exe must use IMAGE_SUBSYSTEM_WINDOWS_GUI (2), got $subsystem"
         }
 
+    - name: End-to-end smoke test from a read-only install directory
+      shell: pwsh
+      timeout-minutes: 20
+      run: |
+        # Like Program Files for the IME's processes: nothing may be written
+        # next to the binaries (e.g. WebView2 user data).
+        $dir = "C:\AzookeySmoke"
+        Copy-Item -Recurse build $dir
+        icacls $dir /deny "*S-1-1-0:(OI)(CI)(W)" | Out-Null
+        ./target/release/azookey-smoke.exe --start $dir
+        if ($LASTEXITCODE -ne 0) { throw "smoke test failed" }
+
     - name: Upload Setup Artifact
       uses: actions/upload-artifact@v4
       with:

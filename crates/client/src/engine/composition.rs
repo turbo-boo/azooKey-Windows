@@ -858,22 +858,23 @@ impl TextServiceFactory {
                         continue;
                     }
 
-                    let empty = "".to_string();
-                    let text = candidates
-                        .texts
-                        .get(selection_index as usize)
-                        .cloned()
-                        .unwrap_or(empty.clone());
-                    let sub_text = candidates
-                        .sub_texts
-                        .get(selection_index as usize)
-                        .cloned()
-                        .unwrap_or(empty.clone());
-                    corresponding_count = candidates
-                        .corresponding_count
-                        .get(selection_index as usize)
-                        .cloned()
-                        .unwrap_or(0);
+                    // The converter returns a fresh candidate list, so the
+                    // previous selection index does not apply to it.
+                    selection_index = 0;
+                    let Some((text, sub_text, count)) =
+                        candidate_parts(&candidates, selection_index)
+                    else {
+                        corresponding_count = 0;
+                        preview = hiragana.clone();
+                        suffix.clear();
+                        raw_hiragana = hiragana;
+                        should_learn_candidate = false;
+                        self.set_text(&preview, "")?;
+                        ipc_service.hide_window()?;
+                        ipc_service.set_candidates(vec![])?;
+                        continue;
+                    };
+                    corresponding_count = count;
 
                     raw_input = raw_input
                         .chars()

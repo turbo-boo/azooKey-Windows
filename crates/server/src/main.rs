@@ -110,10 +110,8 @@ fn add_text(input: &str) -> RawComposingText {
     }
 }
 
-fn move_cursor(offset: i8) -> RawComposingText {
+fn move_cursor(offset: i32) -> RawComposingText {
     unsafe {
-        let offset = c_int::from(offset);
-        println!("Offset: {}", offset);
         let mut cursor: c_int = 0;
 
         let result = MoveCursor(offset, &mut cursor);
@@ -226,9 +224,8 @@ fn clear_post_composition_predictions() {
     }
 }
 
-fn shrink_text(offset: i8) -> RawComposingText {
+fn shrink_text(offset: i32) -> RawComposingText {
     unsafe {
-        let offset = c_int::from(offset);
         let result = ShrinkText(offset);
 
         RawComposingText {
@@ -324,7 +321,7 @@ impl AzookeyService for MyAzookeyService {
         &self,
         request: Request<MoveCursorRequest>,
     ) -> Result<Response<MoveCursorResponse>, Status> {
-        let offset = request.into_inner().offset as i8;
+        let offset = request.into_inner().offset;
         let composing_text = move_cursor(offset);
 
         Ok(Response::new(MoveCursorResponse {
@@ -344,7 +341,7 @@ impl AzookeyService for MyAzookeyService {
         &self,
         request: Request<ShrinkTextRequest>,
     ) -> Result<Response<ShrinkTextResponse>, Status> {
-        let offset = request.into_inner().offset as i8;
+        let offset = request.into_inner().offset;
         let composing_text = shrink_text(offset);
 
         Ok(Response::new(ShrinkTextResponse {

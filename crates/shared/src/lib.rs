@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
+pub mod pipe;
+
 pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/azookey.rs"));
     include!(concat!(env!("OUT_DIR"), "/window.rs"));

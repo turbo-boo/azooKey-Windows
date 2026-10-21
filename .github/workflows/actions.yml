@@ -166,6 +166,16 @@ jobs:
           throw "launcher.exe must use IMAGE_SUBSYSTEM_WINDOWS_GUI (2), got $subsystem"
         }
 
+    # Baseline only: master + the smoke tool, run from the writable build
+    # directory master was designed for, to record latency for comparison.
+    - name: Baseline latency (master)
+      shell: pwsh
+      timeout-minutes: 20
+      continue-on-error: true
+      run: |
+        ./target/release/azookey-smoke.exe --start (Resolve-Path build)
+        if ($LASTEXITCODE -ne 0) { throw "smoke test failed" }
+
     - name: Upload Setup Artifact
       uses: actions/upload-artifact@v4
       with:

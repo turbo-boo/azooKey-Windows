@@ -6,7 +6,8 @@ use shared::{
     export_user_dictionary_tsv, export_user_dictionary_tsv_utf16le, parse_user_dictionary,
     validate_tuner_directory, AppConfig, UserDictionaryEntry,
 };
-use std::{path::PathBuf, sync::Mutex};
+use parking_lot::Mutex;
+use std::path::PathBuf;
 
 #[derive(Debug)]
 pub struct AppState {
@@ -30,13 +31,13 @@ fn greet(name: &str) -> String {
 
 #[tauri::command]
 fn get_config(state: tauri::State<AppState>) -> AppConfig {
-    let config = state.settings.lock().unwrap();
+    let config = state.settings.lock();
     config.clone()
 }
 
 #[tauri::command]
 fn update_config(state: tauri::State<AppState>, new_config: AppConfig) {
-    let mut config = state.settings.lock().unwrap();
+    let mut config = state.settings.lock();
     *config = new_config;
     config.write();
 
@@ -60,7 +61,7 @@ fn import_dictionary_file(path: String) -> Result<Vec<UserDictionaryEntry>, Stri
 #[tauri::command]
 fn export_dictionary_file(state: tauri::State<AppState>, path: String) -> Result<(), String> {
     let path = PathBuf::from(path);
-    let config = state.settings.lock().map_err(|_| "設定のロックに失敗しました")?;
+    let config = state.settings.lock();
     let extension = dictionary_extension(&path)
         .unwrap_or_default()
         .to_ascii_lowercase();

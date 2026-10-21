@@ -14,7 +14,7 @@ use windows::Win32::{
         WS_POPUP,
     },
 };
-use wry::WebViewBuilder;
+use wry::{WebContext, WebViewBuilder};
 
 use crate::UserEvent;
 
@@ -89,8 +89,8 @@ pub fn theme_payload(theme: &ThemeConfig) -> String {
     .unwrap_or_else(|_| "{}".to_string())
 }
 
-pub fn create_candidate_webview<'a>() -> Result<WebViewBuilder<'a>> {
-    let webview_builder = WebViewBuilder::new()
+pub fn create_candidate_webview(web_context: &mut WebContext) -> Result<WebViewBuilder<'_>> {
+    let webview_builder = WebViewBuilder::with_web_context(web_context)
         .with_transparent(true)
         .with_html(
             r##"

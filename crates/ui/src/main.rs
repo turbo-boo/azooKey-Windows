@@ -39,6 +39,14 @@ pub enum UserEvent {
     WindowAction(WindowAction),
 }
 
+fn webview_data_directory() -> std::path::PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Azookey")
+        .join("WebView2")
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // obtain uiaccess token
@@ -68,9 +76,13 @@ async fn main() -> anyhow::Result<()> {
     let event_loop_proxy = event_loop.create_proxy();
     let task_guard: Arc<Mutex<Option<JoinHandle<()>>>> = Arc::new(Mutex::new(None));
 
+    // WebView2 defaults its user data folder to "<exe>.WebView2" next to the
+    // executable, which is not writable under Program Files.
+    let mut web_context = wry::WebContext::new(Some(webview_data_directory()));
+
     let proxy_clone = event_loop_proxy.clone();
     let candidate_window = candidate::create_candidate_window(&event_loop)?;
-    let candidate_webview_builder = candidate::create_candidate_webview()?;
+    let candidate_webview_builder = candidate::create_candidate_webview(&mut web_context)?;
     let candidate_webview = candidate_webview_builder
         .with_devtools(cfg!(debug_assertions))
         .with_ipc_handler(move |message| {
@@ -93,7 +105,8 @@ async fn main() -> anyhow::Result<()> {
     candidate_webview.evaluate_script(&format!("applyTheme({})", theme_json))?;
 
     let indicator_window = indicator::create_indicator_window(&event_loop)?;
-    let indicator_webview = indicator::create_indicator_webview(&indicator_window)?;
+    let indicator_webview =
+        indicator::create_indicator_webview(&indicator_window, &mut web_context)?;
 
     // handle window actions
     let proxy_clone = event_loop_proxy.clone();

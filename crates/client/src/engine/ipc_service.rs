@@ -4,8 +4,12 @@ use shared::proto::{
     azookey_service_client::AzookeyServiceClient, window_service_client::WindowServiceClient,
 };
 use std::{sync::Arc, time::Duration};
-use tokio::{net::windows::named_pipe::ClientOptions, time};
-use tonic::transport::Endpoint;
+use tokio::{
+    net::windows::named_pipe::{ClientOptions, NamedPipeClient},
+    sync::mpsc,
+    time,
+};
+use tonic::transport::{Channel, Endpoint};
 use tower::service_fn;
 use windows::Win32::Foundation::ERROR_PIPE_BUSY;
 
@@ -13,10 +17,22 @@ use windows::Win32::Foundation::ERROR_PIPE_BUSY;
 #[derive(Debug, Clone)]
 pub struct IPCService {
     // kkc server client
-    azookey_client: AzookeyServiceClient<tonic::transport::channel::Channel>,
-    // candidate window server client
-    window_client: WindowServiceClient<tonic::transport::channel::Channel>,
+    azookey_client: AzookeyServiceClient<Channel>,
+    // candidate window updates, delivered in order by a dedicated thread
+    window_commands: mpsc::UnboundedSender<WindowCommand>,
+    // current-thread runtime: block_on drives the pipe I/O on the calling
+    // thread instead of waiting for a wakeup from a worker thread
     runtime: Arc<tokio::runtime::Runtime>,
+}
+
+#[derive(Debug)]
+enum WindowCommand {
+    Show,
+    Hide,
+    SetPosition(shared::proto::WindowPosition),
+    SetCandidates(Vec<String>),
+    SetSelection(i32),
+    SetInputMode(String),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -35,55 +51,109 @@ pub struct Candidates {
     pub is_converted: bool,
 }
 
+async fn open_pipe(name: &'static str) -> std::io::Result<TokioIo<NamedPipeClient>> {
+    let client = loop {
+        match ClientOptions::new().open(name) {
+            Ok(client) => break client,
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32) => (),
+            Err(e) => return Err(e),
+        }
+
+        time::sleep(Duration::from_millis(50)).await;
+    };
+
+    Ok(TokioIo::new(client))
+}
+
+fn current_thread_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+}
+
+// Candidate window updates do not return data the composition depends on, so
+// the TSF thread only enqueues them. A single consumer keeps them in order.
+fn spawn_window_dispatcher() -> Result<mpsc::UnboundedSender<WindowCommand>> {
+    let (sender, mut receiver) = mpsc::unbounded_channel::<WindowCommand>();
+    let runtime = current_thread_runtime()?;
+
+    std::thread::Builder::new()
+        .name("azookey-window-ipc".to_string())
+        .spawn(move || {
+            runtime.block_on(async move {
+                let channel = match Endpoint::try_from("http://[::]:50052") {
+                    Ok(endpoint) => endpoint.connect_with_connector_lazy(service_fn(|_| {
+                        open_pipe(r"\\.\pipe\azookey_ui")
+                    })),
+                    Err(error) => {
+                        tracing::error!("Invalid window endpoint: {error:?}");
+                        return;
+                    }
+                };
+                let mut client = WindowServiceClient::new(channel);
+
+                while let Some(command) = receiver.recv().await {
+                    let result = match command {
+                        WindowCommand::Show => client
+                            .show_window(shared::proto::EmptyResponse {})
+                            .await
+                            .map(drop),
+                        WindowCommand::Hide => client
+                            .hide_window(shared::proto::EmptyResponse {})
+                            .await
+                            .map(drop),
+                        WindowCommand::SetPosition(position) => client
+                            .set_window_position(shared::proto::SetPositionRequest {
+                                position: Some(position),
+                            })
+                            .await
+                            .map(drop),
+                        WindowCommand::SetCandidates(candidates) => client
+                            .set_candidate(shared::proto::SetCandidateRequest { candidates })
+                            .await
+                            .map(drop),
+                        WindowCommand::SetSelection(index) => client
+                            .set_selection(shared::proto::SetSelectionRequest { index })
+                            .await
+                            .map(drop),
+                        WindowCommand::SetInputMode(mode) => client
+                            .set_input_mode(shared::proto::SetInputModeRequest { mode })
+                            .await
+                            .map(drop),
+                    };
+                    if let Err(error) = result {
+                        tracing::warn!("Candidate window update failed: {error:?}");
+                    }
+                }
+            });
+        })?;
+
+    Ok(sender)
+}
+
 impl IPCService {
     pub fn new() -> Result<Self> {
-        let runtime = tokio::runtime::Runtime::new()?;
+        let runtime = current_thread_runtime()?;
 
         let server_channel = runtime.block_on(
-            Endpoint::try_from("http://[::]:50051")?.connect_with_connector(service_fn(
-                |_| async {
-                    let client = loop {
-                        match ClientOptions::new().open(r"\\.\pipe\azookey_server") {
-                            Ok(client) => break client,
-                            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32) => (),
-                            Err(e) => return Err(e),
-                        }
-
-                        time::sleep(Duration::from_millis(50)).await;
-                    };
-
-                    Ok::<_, std::io::Error>(TokioIo::new(client))
-                },
-            )),
-        )?;
-
-        let ui_channel = runtime.block_on(
-            Endpoint::try_from("http://[::]:50052")?.connect_with_connector(service_fn(
-                |_| async {
-                    let client = loop {
-                        match ClientOptions::new().open(r"\\.\pipe\azookey_ui") {
-                            Ok(client) => break client,
-                            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32) => (),
-                            Err(e) => return Err(e),
-                        }
-
-                        time::sleep(Duration::from_millis(50)).await;
-                    };
-
-                    Ok::<_, std::io::Error>(TokioIo::new(client))
-                },
-            )),
+            Endpoint::try_from("http://[::]:50051")?
+                .connect_with_connector(service_fn(|_| open_pipe(r"\\.\pipe\azookey_server"))),
         )?;
 
         let azookey_client = AzookeyServiceClient::new(server_channel);
-        let window_client = WindowServiceClient::new(ui_channel);
         tracing::debug!("Connected to server: {:?}", azookey_client);
 
         Ok(Self {
             azookey_client,
-            window_client,
+            window_commands: spawn_window_dispatcher()?,
             runtime: Arc::new(runtime),
         })
+    }
+
+    fn send_window_command(&self, command: WindowCommand) -> Result<()> {
+        self.window_commands
+            .send(command)
+            .map_err(|_| anyhow::anyhow!("candidate window dispatcher stopped"))
     }
 }
 
@@ -336,27 +406,14 @@ impl IPCService {
 
 // implement methods to interact with candidate window server
 impl IPCService {
-    #[tracing::instrument]
     pub fn show_window(&mut self) -> anyhow::Result<()> {
-        let request = tonic::Request::new(shared::proto::EmptyResponse {});
-        self.runtime
-            .clone()
-            .block_on(self.window_client.show_window(request))?;
-
-        Ok(())
+        self.send_window_command(WindowCommand::Show)
     }
 
-    #[tracing::instrument]
     pub fn hide_window(&mut self) -> anyhow::Result<()> {
-        let request = tonic::Request::new(shared::proto::EmptyResponse {});
-        self.runtime
-            .clone()
-            .block_on(self.window_client.hide_window(request))?;
-
-        Ok(())
+        self.send_window_command(WindowCommand::Hide)
     }
 
-    #[tracing::instrument]
     pub fn set_window_position(
         &mut self,
         top: i32,
@@ -364,50 +421,23 @@ impl IPCService {
         bottom: i32,
         right: i32,
     ) -> anyhow::Result<()> {
-        let request = tonic::Request::new(shared::proto::SetPositionRequest {
-            position: Some(shared::proto::WindowPosition {
-                top,
-                left,
-                bottom,
-                right,
-            }),
-        });
-        self.runtime
-            .clone()
-            .block_on(self.window_client.set_window_position(request))?;
-
-        Ok(())
+        self.send_window_command(WindowCommand::SetPosition(shared::proto::WindowPosition {
+            top,
+            left,
+            bottom,
+            right,
+        }))
     }
 
-    #[tracing::instrument]
     pub fn set_candidates(&mut self, candidates: Vec<String>) -> anyhow::Result<()> {
-        let request = tonic::Request::new(shared::proto::SetCandidateRequest { candidates });
-        self.runtime
-            .clone()
-            .block_on(self.window_client.set_candidate(request))?;
-
-        Ok(())
+        self.send_window_command(WindowCommand::SetCandidates(candidates))
     }
 
-    #[tracing::instrument]
     pub fn set_selection(&mut self, index: i32) -> anyhow::Result<()> {
-        let request = tonic::Request::new(shared::proto::SetSelectionRequest { index });
-        self.runtime
-            .clone()
-            .block_on(self.window_client.set_selection(request))?;
-
-        Ok(())
+        self.send_window_command(WindowCommand::SetSelection(index))
     }
 
-    #[tracing::instrument]
     pub fn set_input_mode(&mut self, mode: &str) -> anyhow::Result<()> {
-        let request = tonic::Request::new(shared::proto::SetInputModeRequest {
-            mode: mode.to_string(),
-        });
-        self.runtime
-            .clone()
-            .block_on(self.window_client.set_input_mode(request))?;
-
-        Ok(())
+        self.send_window_command(WindowCommand::SetInputMode(mode.to_string()))
     }
 }

@@ -553,7 +553,12 @@ impl TextServiceFactory {
             .context("ipc_service is None")?;
         let mut transition = transition;
 
-        self.update_context(&preview)?;
+        // The text preceding the composition only changes when a composition
+        // starts or a prefix is committed (ShrinkText), so do not pay an edit
+        // session and a server round trip for it on every keystroke.
+        if actions.contains(&ClientAction::StartComposition) {
+            self.update_context(&preview)?;
+        }
 
         for action in actions {
             match action {
@@ -988,6 +993,7 @@ impl TextServiceFactory {
                         let remaining = hiragana.clone();
                         self.shift_start(&preview, &remaining)?;
                         preview = remaining;
+                        self.update_context(&preview)?;
                         suffix.clear();
                         raw_hiragana = hiragana;
                         should_learn_candidate = false;
@@ -1000,6 +1006,7 @@ impl TextServiceFactory {
 
                     corresponding_count = count;
                     preview = text.clone();
+                    self.update_context(&preview)?;
                     suffix = sub_text.clone();
                     raw_hiragana = hiragana.clone();
                     should_learn_candidate =

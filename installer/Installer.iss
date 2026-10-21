@@ -40,8 +40,10 @@ PrivilegesRequired=admin
 Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 
 [Files]
-Source: "../build/azookey_windows.dll"; DestDir: "{app}"; DestName: "azookey.dll"; Flags: ignoreversion regserver 64bit
-Source: "../build/x86/azookey_windows.dll"; DestDir: "{app}"; DestName: "azookey32.dll"; Flags: ignoreversion regserver 32bit
+; restartreplace/uninsrestartdelete: the IME DLLs stay loaded in running apps,
+; so replace/delete them on the next restart when they are in use.
+Source: "../build/azookey_windows.dll"; DestDir: "{app}"; DestName: "azookey.dll"; Flags: ignoreversion regserver restartreplace uninsrestartdelete 64bit
+Source: "../build/x86/azookey_windows.dll"; DestDir: "{app}"; DestName: "azookey32.dll"; Flags: ignoreversion regserver restartreplace uninsrestartdelete 32bit
 Source: "../build/*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "../target/release/bundle/nsis/Azookey_0.1.0_x64-setup.exe"; Flags: dontcopy noencryption
 Source: "./Azookey Startup.xml"; Flags: dontcopy noencryption
@@ -184,6 +186,34 @@ begin
   end;
 end;
 
+// Stops the startup task and the launcher/server/UI processes started from Dir
+// so their files can be replaced or deleted. Matches on the executable path
+// because the image names (ui.exe, launcher.exe) are generic.
+procedure StopAzookeyProcesses(Dir: String);
+var
+  PsDir: String;
+  Script: String;
+  ResultCode: Integer;
+begin
+  Exec(ExpandConstant('{sys}\schtasks.exe'), '/End /TN "Azookey Startup"', '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  PsDir := RemoveBackslashUnlessRoot(Dir);
+  StringChangeEx(PsDir, '''', '''''', True);
+  Script := 'Get-Process -Name launcher,azookey-server,ui -ErrorAction SilentlyContinue | ' +
+    'Where-Object { $_.Path -and $_.Path.StartsWith(''' + PsDir + '\'', [StringComparison]::OrdinalIgnoreCase) } | ' +
+    'Stop-Process -Force';
+  Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' + Script + '"', '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+<event('PrepareToInstall')>
+function Azookey_PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  StopAzookeyProcesses(ExpandConstant('{app}'));
+end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
@@ -203,6 +233,11 @@ end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
+  if CurUninstallStep = usUninstall then
+  begin
+    // Release launcher/server/UI files before they are deleted.
+    StopAzookeyProcesses(ExpandConstant('{app}'));
+  end;
   if CurUninstallStep = usPostUninstall then
   begin
     UninstallAzookey();

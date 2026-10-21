@@ -7,7 +7,7 @@ use tokio::{
 };
 use tonic::transport::server::Connected;
 use windows::{
-    core::w,
+    core::HSTRING,
     Win32::Security::{
         Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION},
         PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
@@ -68,16 +68,24 @@ impl AsyncWrite for TonicNamedPipeServer {
 
 impl TonicNamedPipeServer {
     pub fn new(path: &str) -> impl Stream<Item = io::Result<TonicNamedPipeServer>> {
-        // set security attributes to allow ipc from sandboxed processes
+        // Allow IPC from sandboxed processes (AppContainer / restricted tokens),
         // see https://nathancorvussolis.blogspot.com/2018/05/windows-ime-security.html
+        // Only SYSTEM, Administrators and the pipe owner (the user running the
+        // server) get GENERIC_ALL. Everyone else gets read/write data only:
+        // FILE_CREATE_PIPE_INSTANCE would let them register a rogue instance of
+        // this pipe and intercept the IME's traffic.
 
         let name = format!("\\\\.\\pipe\\{}", path);
+        let client = shared::pipe::CLIENT_ACCESS_SDDL;
+        let sddl = HSTRING::from(format!(
+            "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)(A;;{client};;;BU)(A;;{client};;;AC)(A;;{client};;;RC)S:(ML;;NW;;;LW)"
+        ));
 
         let mut security_descriptor = PSECURITY_DESCRIPTOR::default();
 
         unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                w!("D:(A;;GA;;;AC)(A;;GA;;;RC)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;BU)S:(ML;;NW;;;LW)"),
+                &sddl,
                 SDDL_REVISION,
                 &mut security_descriptor,
                 None,

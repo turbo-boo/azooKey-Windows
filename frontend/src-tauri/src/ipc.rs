@@ -2,7 +2,7 @@ use anyhow::Result;
 use hyper_util::rt::TokioIo;
 use shared::proto::azookey_service_client::AzookeyServiceClient;
 use std::{sync::Arc, time::Duration};
-use tokio::{net::windows::named_pipe::ClientOptions, time};
+use tokio::time;
 use tonic::transport::Endpoint;
 use tower::service_fn;
 use windows::Win32::Foundation::ERROR_PIPE_BUSY;
@@ -23,7 +23,7 @@ impl IPCService {
             Endpoint::try_from("http://[::]:50051")?.connect_with_connector(service_fn(
                 |_| async {
                     let client = loop {
-                        match ClientOptions::new().open(r"\\.\pipe\azookey_server") {
+                        match shared::pipe::open_client(r"\\.\pipe\azookey_server") {
                             Ok(client) => break client,
                             Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32) => (),
                             Err(e) => return Err(e),

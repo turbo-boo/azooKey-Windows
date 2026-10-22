@@ -97,7 +97,8 @@ impl MessageWindow {
             SetWindowLongPtrW(
                 hwnd,
                 GWLP_USERDATA,
-                owner as *const TextServiceFactory as isize,
+                // isize on 64-bit; on 32-bit this is SetWindowLongW (i32)
+                owner as *const TextServiceFactory as _,
             );
 
             Ok(Self {

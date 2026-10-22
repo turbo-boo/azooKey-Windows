@@ -457,7 +457,8 @@ public func free_candidates(
     offset: Int32
 ) -> UnsafeMutablePointer<CChar>  {
     var afterComposingText = composingText
-    afterComposingText.prefixComplete(correspondingCount: Int(offset))
+    // prefixComplete clamps the upper bound only; a negative count traps.
+    afterComposingText.prefixComplete(correspondingCount: max(0, Int(offset)))
     composingText = afterComposingText
 
     return _strdup(composingText.convertTarget)!

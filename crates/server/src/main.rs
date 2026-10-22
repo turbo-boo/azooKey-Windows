@@ -344,6 +344,10 @@ impl AzookeyService for MyAzookeyService {
         request: Request<ShrinkTextRequest>,
     ) -> Result<Response<ShrinkTextResponse>, Status> {
         let offset = request.into_inner().offset;
+        // The converter traps on a negative count.
+        if offset < 0 {
+            return Err(Status::invalid_argument("offset must not be negative"));
+        }
         let composing_text = shrink_text(offset);
 
         Ok(Response::new(ShrinkTextResponse {

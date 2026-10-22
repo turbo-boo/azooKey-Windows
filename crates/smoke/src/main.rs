@@ -15,7 +15,7 @@ use anyhow::{bail, ensure, Context, Result};
 use hyper_util::rt::TokioIo;
 use shared::proto::{
     azookey_service_client::AzookeyServiceClient, window_service_client::WindowServiceClient,
-    AppendTextRequest, ClearTextRequest, EmptyResponse, RequestConversionRequest,
+    AppendTextRequest, ClearTextRequest, EmptyResponse, MoveCursorRequest, RequestConversionRequest,
     SetCandidateRequest, SetInputModeRequest, SetSelectionRequest, ShrinkTextRequest,
 };
 use tonic::transport::{Channel, Endpoint};
@@ -195,6 +195,22 @@ async fn check_converter(client: &mut AzookeyServiceClient<Channel>, keys: &str)
         after.hiragana.chars().count() == 2,
         "ShrinkText(128) left {} of 130 kana, expected 2",
         after.hiragana.chars().count()
+    );
+
+    // A negative count is rejected instead of crashing the converter.
+    let negative = client.shrink_text(ShrinkTextRequest { offset: -1 }).await;
+    ensure!(
+        matches!(&negative, Err(status) if status.code() == tonic::Code::InvalidArgument),
+        "ShrinkText(-1) returned {negative:?}, expected InvalidArgument"
+    );
+    let still = timed(&mut other, client.move_cursor(MoveCursorRequest { offset: 0 }))
+        .await?
+        .composing_text
+        .context("MoveCursor returned no composing text")?;
+    ensure!(
+        still.hiragana.chars().count() == 2,
+        "composition changed after rejected ShrinkText(-1): {:?}",
+        still.hiragana
     );
 
     timed(&mut other, client.clear_text(ClearTextRequest {})).await?;

@@ -116,7 +116,8 @@ impl TextServiceFactory {
                 text_service.tid,
                 parent_context.clone(),
                 Rc::new({
-                    let preview_count = preview.chars().count() as i32;
+                    // TSF positions count UTF-16 code units
+                    let preview_count = preview.encode_utf16().count() as i32;
 
                     move |cookie| {
                         // 2. Get the selection from the parent context.

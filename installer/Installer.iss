@@ -179,13 +179,19 @@ end;
 procedure UninstallAzookey();
 var
   UninstallString: string;
-  Dummy: Integer;
+  ResultCode: Integer;
 begin
   if RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\Azookey', 'UninstallString', UninstallString) then
   begin
+    // The NSIS uninstaller of the settings app is interactive unless run
+    // with /S; hidden, its confirmation page would never be answered.
+    UninstallString := RemoveQuotes(UninstallString);
     if UninstallString <> '' then
     begin
-      ShellExec('', UninstallString, '', '', SW_HIDE, ewWaitUntilTerminated, Dummy);
+      if not Exec(UninstallString, '/S', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+        Log(Format('Failed to start the settings app uninstaller: %s', [SysErrorMessage(ResultCode)]))
+      else if ResultCode <> 0 then
+        Log(Format('Settings app uninstaller exited with code %d', [ResultCode]));
     end;
   end;
 end;

@@ -232,8 +232,19 @@ impl AppConfig {
             eprintln!("Failed to serialize settings");
             return;
         };
-        if let Err(error) = std::fs::write(config_path, config_str) {
+        // Readers (IME, UI, server, settings app) may open the file at any
+        // time; write a temporary file and replace the settings in one step
+        // so nobody reads a half-written file.
+        let temp_path =
+            config_root.join(format!("{SETTINGS_FILENAME}.{}.tmp", std::process::id()));
+        if let Err(error) = std::fs::write(&temp_path, config_str) {
             eprintln!("Failed to write settings: {error}");
+            let _ = std::fs::remove_file(&temp_path);
+            return;
+        }
+        if let Err(error) = replace_file(&temp_path, &config_path) {
+            eprintln!("Failed to write settings: {error}");
+            let _ = std::fs::remove_file(&temp_path);
         }
     }
 
@@ -257,8 +268,28 @@ impl AppConfig {
 
     pub fn new() -> Self {
         let config = Self::read();
-        config.write();
+        // Create the file on first run only. Rewriting an existing file here
+        // would replace settings that could not be read with the defaults.
+        if !get_config_root().join(SETTINGS_FILENAME).exists() {
+            config.write();
+        }
         config
+    }
+}
+
+/// Replaces `dest` with `source`. A reader that has `dest` open without
+/// FILE_SHARE_DELETE makes the replacement fail briefly, so retry a few times.
+fn replace_file(source: &Path, dest: &Path) -> std::io::Result<()> {
+    let mut attempt = 0;
+    loop {
+        match std::fs::rename(source, dest) {
+            Ok(()) => return Ok(()),
+            Err(_) if attempt < 10 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 

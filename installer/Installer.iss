@@ -40,6 +40,11 @@ OutputBaseFilename=azookey-setup
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=admin
+; The IME DLLs are loaded by nearly every process (including svchost), so the
+; Restart Manager check would stop on "Preparing to Install" asking to close
+; them. The DLLs are replaced on restart (restartreplace) and our own
+; processes are stopped in PrepareToInstall instead.
+CloseApplications=no
 
 [Languages]
 Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
@@ -83,8 +88,11 @@ begin
   ExtractTemporaryFile('Azookey_0.1.0_x64-setup.exe');
   Dependency_AddVC2015To2022x64;
   Dependency_AddVC2015To2022x86;
+  // NSIS installers take /S for a silent install; the previous /q was not
+  // recognised, so the settings app's installer wizard opened and Setup
+  // waited for it.
   Dependency_Add('Azookey_0.1.0_x64-setup.exe',
-    '/q',
+    '/S',
     'Azookey',
     '', '', True, False);
 

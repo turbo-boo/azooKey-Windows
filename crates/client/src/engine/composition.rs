@@ -6,7 +6,7 @@ use crate::{
 
 use super::{
     client_action::{ClientAction, SetSelectionType, SetTextType},
-    full_width::{to_fullwidth, to_halfwidth},
+    full_width::{to_fullwidth, to_fullwidth_latin, to_halfwidth},
     input_mode::InputMode,
     ipc_service::Candidates,
     state::IMEState,
@@ -646,7 +646,7 @@ impl TextServiceFactory {
                     raw_input.push_str(&text);
 
                     let text = match mode {
-                        InputMode::Kana => to_fullwidth(text, false),
+                        InputMode::Kana => to_fullwidth(text),
                         InputMode::Latin => text.to_string(),
                     };
 
@@ -1009,7 +1009,7 @@ impl TextServiceFactory {
 
                     let shrunk = ipc_service.shrink_text(corresponding_count)?;
                     let text = match mode {
-                        InputMode::Kana => to_fullwidth(text, false),
+                        InputMode::Kana => to_fullwidth(text),
                         InputMode::Latin => text.to_string(),
                     };
                     candidates = if text.is_empty() {
@@ -1063,7 +1063,7 @@ impl TextServiceFactory {
                         SetTextType::Hiragana => raw_hiragana.clone(),
                         SetTextType::Katakana => to_katakana(&raw_hiragana),
                         SetTextType::HalfKatakana => to_half_katakana(&raw_hiragana),
-                        SetTextType::FullLatin => to_fullwidth(&raw_input, true),
+                        SetTextType::FullLatin => to_fullwidth_latin(&raw_input),
                         SetTextType::HalfLatin => to_halfwidth(&raw_input),
                     };
 

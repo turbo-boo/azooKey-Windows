@@ -64,11 +64,12 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // start grpc server
+    let incoming = TonicNamedPipeServer::new(shared::pipe::UI_PIPE)?;
     tokio::spawn(async move {
         println!("WindowServer listening");
         Server::builder()
             .add_service(WindowServiceServer::new(grpc_service))
-            .serve_with_incoming(TonicNamedPipeServer::new("azookey_ui"))
+            .serve_with_incoming(incoming)
             .await
             .expect("gRPC server failed");
     });

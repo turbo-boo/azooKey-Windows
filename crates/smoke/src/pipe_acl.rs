@@ -1,7 +1,7 @@
-//! Checks that a pipe's DACL lets only SYSTEM, Administrators and the owner
-//! create additional server instances. Anyone else holding
-//! FILE_CREATE_PIPE_INSTANCE could register a rogue instance and receive IME
-//! connections.
+//! Checks a pipe's DACL: only SYSTEM, Administrators and the owner may create
+//! additional server instances (anyone else holding FILE_CREATE_PIPE_INSTANCE
+//! could register a rogue instance and receive IME connections), and no
+//! group containing other users may connect at all.
 
 use anyhow::{bail, Context, Result};
 use windows::{
@@ -25,8 +25,11 @@ const GENERIC_ALL: u32 = 0x1000_0000;
 const GENERIC_WRITE: u32 = 0x4000_0000;
 /// SYSTEM, BUILTIN\Administrators, OWNER RIGHTS
 const TRUSTED: [&str; 3] = ["S-1-5-18", "S-1-5-32-544", "S-1-3-4"];
+/// Everyone, Authenticated Users, Interactive, BUILTIN\Users: groups that
+/// include other users, who must not reach this user's IME servers.
+const OTHER_USERS: [&str; 4] = ["S-1-1-0", "S-1-5-11", "S-1-5-4", "S-1-5-32-545"];
 
-pub fn check_clients_cannot_create_instances(pipe: &str) -> Result<()> {
+pub fn check_dacl(pipe: &str) -> Result<()> {
     let mut offenders = Vec::new();
     unsafe {
         let handle = CreateFileW(
@@ -81,7 +84,10 @@ pub fn check_clients_cannot_create_instances(pipe: &str) -> Result<()> {
 
             let risky = ace.Mask & (FILE_CREATE_PIPE_INSTANCE | GENERIC_ALL | GENERIC_WRITE);
             if risky != 0 && !TRUSTED.contains(&name.as_str()) {
-                offenders.push(format!("{name} has access mask {:#x}", ace.Mask));
+                offenders.push(format!("{name} can create instances (mask {:#x})", ace.Mask));
+            }
+            if OTHER_USERS.contains(&name.as_str()) {
+                offenders.push(format!("{name} (other users) has access mask {:#x}", ace.Mask));
             }
         }
 
@@ -91,9 +97,6 @@ pub fn check_clients_cannot_create_instances(pipe: &str) -> Result<()> {
     if offenders.is_empty() {
         Ok(())
     } else {
-        bail!(
-            "untrusted principals can create pipe instances: {}",
-            offenders.join(", ")
-        )
+        bail!("pipe DACL is too broad: {}", offenders.join(", "))
     }
 }

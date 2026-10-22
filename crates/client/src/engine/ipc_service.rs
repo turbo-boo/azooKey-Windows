@@ -69,9 +69,10 @@ impl Candidates {
     }
 }
 
-async fn open_pipe(name: &'static str) -> std::io::Result<TokioIo<NamedPipeClient>> {
+async fn open_pipe(base: &'static str) -> std::io::Result<TokioIo<NamedPipeClient>> {
+    let path = shared::pipe::path(base)?;
     let client = loop {
-        match shared::pipe::open_client(name) {
+        match shared::pipe::open_client(&path) {
             Ok(client) => break client,
             Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32) => (),
             Err(e) => return Err(e),
@@ -101,7 +102,7 @@ fn spawn_window_dispatcher() -> Result<mpsc::UnboundedSender<WindowCommand>> {
             runtime.block_on(async move {
                 let channel = match Endpoint::try_from("http://[::]:50052") {
                     Ok(endpoint) => endpoint.connect_with_connector_lazy(service_fn(|_| {
-                        open_pipe(r"\\.\pipe\azookey_ui")
+                        open_pipe(shared::pipe::UI_PIPE)
                     })),
                     Err(error) => {
                         tracing::error!("Invalid window endpoint: {error:?}");
@@ -151,7 +152,7 @@ fn spawn_window_dispatcher() -> Result<mpsc::UnboundedSender<WindowCommand>> {
 
 async fn connect_converter() -> Result<AzookeyServiceClient<Channel>> {
     let channel = Endpoint::try_from("http://[::]:50051")?
-        .connect_with_connector(service_fn(|_| open_pipe(r"\\.\pipe\azookey_server")))
+        .connect_with_connector(service_fn(|_| open_pipe(shared::pipe::SERVER_PIPE)))
         .await?;
     Ok(AzookeyServiceClient::new(channel))
 }

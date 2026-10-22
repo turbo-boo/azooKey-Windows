@@ -25,8 +25,6 @@ use tower::service_fn;
 mod pipe_acl;
 mod wakeup_probe;
 
-const SERVER_PIPE: &str = r"\\.\pipe\azookey_server";
-const UI_PIPE: &str = r"\\.\pipe\azookey_ui";
 const ERROR_PIPE_BUSY: i32 = 231;
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -51,16 +49,20 @@ fn parse_args() -> Result<Args> {
     Ok(args)
 }
 
-async fn connect(pipe: &'static str) -> Result<Channel> {
+async fn connect(pipe: &str) -> Result<Channel> {
+    let pipe = pipe.to_string();
     let channel = Endpoint::try_from("http://[::]:50051")?
-        .connect_with_connector(service_fn(move |_| async move {
-            loop {
-                match shared::pipe::open_client(pipe) {
-                    Ok(client) => return Ok::<_, std::io::Error>(TokioIo::new(client)),
-                    Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
-                        tokio::time::sleep(Duration::from_millis(50)).await
+        .connect_with_connector(service_fn(move |_| {
+            let pipe = pipe.clone();
+            async move {
+                loop {
+                    match shared::pipe::open_client(&pipe) {
+                        Ok(client) => return Ok::<_, std::io::Error>(TokioIo::new(client)),
+                        Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                            tokio::time::sleep(Duration::from_millis(50)).await
+                        }
+                        Err(e) => return Err(e),
                     }
-                    Err(e) => return Err(e),
                 }
             }
         }))
@@ -68,7 +70,7 @@ async fn connect(pipe: &'static str) -> Result<Channel> {
     Ok(channel)
 }
 
-async fn wait_for(pipe: &'static str, within: Duration) -> Result<Channel> {
+async fn wait_for(pipe: &str, within: Duration) -> Result<Channel> {
     let deadline = Instant::now() + within;
     loop {
         match connect(pipe).await {
@@ -292,13 +294,15 @@ async fn main() -> Result<()> {
             .with_context(|| format!("failed to start {}", launcher.display()))?;
     }
 
-    let server = wait_for(SERVER_PIPE, Duration::from_secs(180)).await?;
-    let window = wait_for(UI_PIPE, Duration::from_secs(60)).await?;
-    println!("connected to {SERVER_PIPE} and {UI_PIPE}");
+    let server_pipe = shared::pipe::path(shared::pipe::SERVER_PIPE)?;
+    let ui_pipe = shared::pipe::path(shared::pipe::UI_PIPE)?;
+    let server = wait_for(&server_pipe, Duration::from_secs(180)).await?;
+    let window = wait_for(&ui_pipe, Duration::from_secs(60)).await?;
+    println!("connected to {server_pipe} and {ui_pipe}");
 
     let mut failures = Vec::new();
-    for pipe in [SERVER_PIPE, UI_PIPE] {
-        if let Err(error) = pipe_acl::check_clients_cannot_create_instances(pipe) {
+    for pipe in [&server_pipe, &ui_pipe] {
+        if let Err(error) = pipe_acl::check_dacl(pipe) {
             failures.push(format!("{pipe} ACL: {error:#}"));
         }
     }

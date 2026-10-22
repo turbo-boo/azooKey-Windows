@@ -69,18 +69,23 @@ impl AsyncWrite for TonicNamedPipeServer {
 }
 
 impl TonicNamedPipeServer {
-    pub fn new(path: &str) -> impl Stream<Item = io::Result<TonicNamedPipeServer>> {
+    /// Serves the pipe [`shared::pipe::path`]`(base)` of the current user and
+    /// session.
+    pub fn new(base: &str) -> io::Result<impl Stream<Item = io::Result<TonicNamedPipeServer>>> {
         // Allow IPC from sandboxed processes (AppContainer / restricted tokens),
         // see https://nathancorvussolis.blogspot.com/2018/05/windows-ime-security.html
-        // Only SYSTEM, Administrators and the pipe owner (the user running the
-        // server) get GENERIC_ALL. Everyone else gets read/write data only:
-        // FILE_CREATE_PIPE_INSTANCE would let them register a rogue instance of
-        // this pipe and intercept the IME's traffic.
+        // Only SYSTEM, Administrators and the pipe owner get GENERIC_ALL. The
+        // user running the server, and sandboxes running as that user, get
+        // read/write data only: FILE_CREATE_PIPE_INSTANCE would let them
+        // register a rogue instance of this pipe and intercept the IME's
+        // traffic. Other users get nothing; for AppContainer and restricted
+        // tokens both the user and the AC/RC entry must match.
 
-        let name = format!("\\\\.\\pipe\\{}", path);
+        let name = shared::pipe::path(base)?;
+        let user = shared::pipe::current_user_sid()?;
         let client = shared::pipe::CLIENT_ACCESS_SDDL;
         let sddl = HSTRING::from(format!(
-            "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)(A;;{client};;;BU)(A;;{client};;;AC)(A;;{client};;;RC)S:(ML;;NW;;;LW)"
+            "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)(A;;{client};;;{user})(A;;{client};;;AC)(A;;{client};;;RC)S:(ML;;NW;;;LW)"
         ));
 
         let mut security_descriptor = PSECURITY_DESCRIPTOR::default();
@@ -91,8 +96,7 @@ impl TonicNamedPipeServer {
                 SDDL_REVISION,
                 &mut security_descriptor,
                 None,
-            )
-            .unwrap();
+            )?;
 
             let mut security_attributes = UnsafeSecurityAttributes(SECURITY_ATTRIBUTES {
                 nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -100,7 +104,7 @@ impl TonicNamedPipeServer {
                 bInheritHandle: false.into(),
             });
 
-            stream! {
+            Ok(stream! {
                 let mut server = ServerOptions::new()
                     .first_pipe_instance(true)
                     .create_with_security_attributes_raw(
@@ -123,7 +127,7 @@ impl TonicNamedPipeServer {
                             addr_of_mut!(security_attributes) as *mut c_void
                         )?;
                 }
-            }
+            })
         }
     }
 }

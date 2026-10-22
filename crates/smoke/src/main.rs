@@ -117,6 +117,28 @@ async fn check_converter(client: &mut AzookeyServiceClient<Channel>, keys: &str)
 
     timed(&mut other, client.clear_text(ClearTextRequest {})).await?;
 
+    // A single typed character is shown as is, never replaced by a
+    // prediction such as と -> とか (azooKey-Desktop behaviour).
+    let mut single = None;
+    for key in ["t", "o"] {
+        single = timed(
+            &mut append,
+            client.append_text(AppendTextRequest {
+                text_to_append: key.to_string(),
+            }),
+        )
+        .await?
+        .composing_text;
+    }
+    let single = single.context("AppendText returned no composing text")?;
+    let shown: Vec<&str> = single.suggestions.iter().map(|s| s.text.as_str()).collect();
+    ensure!(
+        single.hiragana == "と" && !single.is_converted && shown == ["と"],
+        "typing \"to\" showed {shown:?} (converted: {}), expected [\"と\"]",
+        single.is_converted
+    );
+    timed(&mut other, client.clear_text(ClearTextRequest {})).await?;
+
     // typing, as the IME sends it in kana mode
     let mut last = None;
     for key in keys.chars() {

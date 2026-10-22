@@ -7,7 +7,7 @@ use windows::{
             ITfEditSession_Impl, ITfInsertAtSelection, ITfRange, GUID_PROP_ATTRIBUTE, TF_AE_NONE,
             TF_ANCHOR_END, TF_ANCHOR_START, TF_ES_ASYNCDONTCARE, TF_ES_READ, TF_ES_READWRITE,
             TF_ES_SYNC, TF_IAS_QUERYONLY, TF_SELECTION, TF_SELECTIONSTYLE, TF_ST_CORRECTION,
-            TF_S_ASYNC, TF_TF_MOVESTART,
+            TF_S_ASYNC,
         },
     },
 };
@@ -149,23 +149,13 @@ impl TextServiceFactory {
                     let context = text_service.context::<ITfContext>()?;
 
                     move |cookie| unsafe {
-                        // clear display attribute first
+                        // The text already in the composition is what gets
+                        // committed; only the display attribute is removed.
                         let range: ITfRange = composition.GetRange()?;
-
-                        // set existing text to the composition
-                        let mut text = vec![0; 1024];
-                        let mut text_len = 1024;
-
-                        let range_new = range.Clone()?;
-                        range_new.GetText(cookie, TF_TF_MOVESTART, &mut text, &mut text_len)?;
-
-                        text = text[..text_len as usize].to_vec();
-                        range.SetText(cookie, TF_ST_CORRECTION, &text)?;
-
                         let prop = context.GetProperty(&GUID_PROP_ATTRIBUTE)?;
                         prop.Clear(cookie, &range)?;
 
-                        // shift the start of the composition
+                        // put the caret after the committed text
                         range.Collapse(cookie, TF_ANCHOR_END)?;
                         let selection = TF_SELECTION {
                             range: ManuallyDrop::new(Some(range.clone())),

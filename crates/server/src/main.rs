@@ -254,8 +254,12 @@ async fn request_magic_conversion(text: &str) -> Result<Vec<String>, String> {
         return Err("APIモデル名が空です".to_string());
     }
 
+    // The endpoint checks above apply to this URL only. A redirect (307/308
+    // re-sends the body) could move the input text to plain HTTP or another
+    // host, so redirects are not followed; a 3xx is reported as an API error.
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(magic.timeout_seconds.clamp(1, 60)))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| error.to_string())?;
 

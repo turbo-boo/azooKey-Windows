@@ -20,7 +20,9 @@ use windows::Win32::{
         Input::KeyboardAndMouse::{
             VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_MENU, VK_RCONTROL, VK_RMENU,
         },
-        TextServices::{ITfComposition, ITfCompositionSink_Impl, ITfContext},
+        TextServices::{
+            ITfComposition, ITfCompositionSink_Impl, ITfContext, GUID_PROP_ATTRIBUTE,
+        },
     },
 };
 
@@ -56,11 +58,27 @@ impl ITfCompositionSink_Impl for TextServiceFactory_Impl {
     #[macros::anyhow]
     fn OnCompositionTerminated(
         &self,
-        _ecwrite: u32,
-        _pcomposition: Option<&ITfComposition>,
+        ecwrite: u32,
+        pcomposition: Option<&ITfComposition>,
     ) -> Result<()> {
         // if user clicked outside the composition, the composition will be terminated
         tracing::debug!("OnCompositionTerminated");
+
+        // TSF already ended the composition and lends its write cookie here;
+        // a new edit session cannot be requested from inside this one. Clear
+        // the marking with the given cookie and forget the composition so
+        // EndComposition below only resets the engine state.
+        {
+            let text_service = self.borrow()?;
+            if let Some(composition) = pcomposition {
+                let context = text_service.context::<ITfContext>()?;
+                unsafe {
+                    let range = composition.GetRange()?;
+                    context.GetProperty(&GUID_PROP_ATTRIBUTE)?.Clear(ecwrite, &range)?;
+                }
+            }
+            text_service.borrow_mut_composition()?.tip_composition = None;
+        }
 
         let actions = vec![ClientAction::EndComposition];
         self.handle_action(&actions, CompositionState::None)?;
@@ -915,9 +933,18 @@ impl TextServiceFactory {
                     }
                 }
                 ClientAction::SetIMEMode(mode) => {
-                    self.start_composition()?;
-                    self.update_pos()?;
-                    self.end_composition()?;
+                    // An empty composition only locates the caret for the mode
+                    // indicator; the mode must still switch when the document
+                    // cannot be edited right now.
+                    match self.start_composition() {
+                        Ok(()) => {
+                            self.update_pos()?;
+                            self.end_composition()?;
+                        }
+                        Err(error) => {
+                            tracing::warn!("Cannot locate the caret for the indicator: {error:?}")
+                        }
+                    }
 
                     let mut ime_state = IMEState::get()?;
                     ime_state.input_mode = mode.clone();

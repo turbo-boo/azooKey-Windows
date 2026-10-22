@@ -176,10 +176,6 @@ impl TextServiceFactory {
                 }),
             )?;
 
-            let Some(preceding_text) = preceding_text else {
-                return Ok(());
-            };
-
             let Some(mut ipc_service) = IMEState::get()?.ipc_service.clone() else {
                 return Ok(());
             };

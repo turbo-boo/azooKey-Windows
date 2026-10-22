@@ -1,20 +1,20 @@
-use macros::anyhow;
 use windows::{
     core::{implement, AsImpl, VARIANT},
     Win32::{
-        Foundation::RECT,
+        Foundation::{E_FAIL, RECT},
         UI::TextServices::{
             ITfComposition, ITfCompositionSink, ITfContext, ITfContextComposition, ITfEditSession,
             ITfEditSession_Impl, ITfInsertAtSelection, ITfRange, GUID_PROP_ATTRIBUTE, TF_AE_NONE,
-            TF_ANCHOR_END, TF_ANCHOR_START, TF_ES_READWRITE, TF_IAS_QUERYONLY, TF_SELECTION,
-            TF_SELECTIONSTYLE, TF_ST_CORRECTION, TF_TF_MOVESTART,
+            TF_ANCHOR_END, TF_ANCHOR_START, TF_ES_ASYNCDONTCARE, TF_ES_READ, TF_ES_READWRITE,
+            TF_ES_SYNC, TF_IAS_QUERYONLY, TF_SELECTION, TF_SELECTIONSTYLE, TF_ST_CORRECTION,
+            TF_S_ASYNC, TF_TF_MOVESTART,
         },
     },
 };
 
 use std::{cell::Cell, mem::ManuallyDrop, rc::Rc, time::Instant};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::{engine::state::IMEState, extension::StringExt as _, globals::GUID_DISPLAY_ATTRIBUTE};
 
@@ -23,15 +23,40 @@ use super::factory::TextServiceFactory;
 #[implement(ITfEditSession)]
 struct EditSession<'a, T> {
     callback: Rc<dyn Fn(u32) -> anyhow::Result<T>>,
-    pub result: Cell<Option<T>>,
+    // None until TSF has run the session
+    pub result: Cell<Option<anyhow::Result<T>>>,
     phantom: std::marker::PhantomData<&'a T>,
 }
 
-// edit action will be performed within this function
+/// Runs `callback` inside a synchronous read/write edit session and returns
+/// its result. The callers continue with the composition right after this
+/// call, so an edit session that TSF would only queue is reported as an
+/// error instead of being silently skipped.
 pub fn edit_session<T>(
     client_id: u32,
     context: ITfContext,
     callback: Rc<dyn Fn(u32) -> anyhow::Result<T>>,
+) -> Result<T> {
+    run_edit_session(client_id, context, callback, TF_ES_SYNC | TF_ES_READWRITE)?
+        .ok_or_else(|| anyhow::anyhow!("synchronous edit session was not run"))
+}
+
+/// Runs `callback` in a read-only edit session, now if possible and queued
+/// otherwise, for work whose result nobody waits for.
+pub fn read_session(
+    client_id: u32,
+    context: ITfContext,
+    callback: Rc<dyn Fn(u32) -> anyhow::Result<()>>,
+) -> Result<()> {
+    run_edit_session(client_id, context, callback, TF_ES_ASYNCDONTCARE | TF_ES_READ)?;
+    Ok(())
+}
+
+fn run_edit_session<T>(
+    client_id: u32,
+    context: ITfContext,
+    callback: Rc<dyn Fn(u32) -> anyhow::Result<T>>,
+    flags: windows::Win32::UI::TextServices::TF_CONTEXT_EDIT_CONTEXT_FLAGS,
 ) -> Result<Option<T>> {
     let session: ITfEditSession = EditSession {
         callback,
@@ -40,23 +65,33 @@ pub fn edit_session<T>(
     }
     .into();
 
-    let result = unsafe { context.RequestEditSession(client_id, &session, TF_ES_READWRITE) };
-
-    match result {
-        Ok(_) => {
-            let session = unsafe { session.as_impl() };
-            Ok(session.result.take())
+    // The outer result is whether the request was accepted; the returned
+    // HRESULT is the edit session's own result.
+    let session_result = unsafe { context.RequestEditSession(client_id, &session, flags)? };
+    let session_impl = unsafe { session.as_impl() };
+    match session_impl.result.take() {
+        Some(result) => result.map(Some),
+        None if session_result == TF_S_ASYNC => Ok(None),
+        None => {
+            session_result.ok()?;
+            Ok(None)
         }
-        Err(e) => Err(anyhow::Error::new(e)),
     }
 }
 
 impl<'a, T> ITfEditSession_Impl for EditSession_Impl<'a, T> {
-    #[anyhow]
-    fn DoEditSession(&self, cookie: u32) -> Result<()> {
-        let result = (self.callback)(cookie)?;
+    fn DoEditSession(&self, cookie: u32) -> windows::core::Result<()> {
+        let result = (self.callback)(cookie);
+        let hresult = match &result {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                tracing::error!("Edit session failed: {error:?}");
+                Err(E_FAIL.into())
+            }
+        };
+        // keep the detailed error for the requester
         self.result.set(Some(result));
-        Ok(())
+        hresult
     }
 }
 
@@ -96,7 +131,7 @@ impl TextServiceFactory {
         )?;
 
         tracing::debug!("Composition started {composition:?}");
-        text_service.borrow_mut_composition()?.tip_composition = composition;
+        text_service.borrow_mut_composition()?.tip_composition = Some(composition);
 
         Ok(())
     }
@@ -304,7 +339,9 @@ impl TextServiceFactory {
             };
 
             if let Some(tip_composition) = tip_composition {
-                edit_session(
+                // Only moves the candidate window: run now if the document
+                // can be read, otherwise when TSF grants the lock.
+                read_session(
                     tid,
                     context.clone(),
                     Rc::new({

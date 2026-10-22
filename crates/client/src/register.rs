@@ -1,6 +1,7 @@
 use windows::{
     core::{w, GUID},
     Win32::{
+        Foundation::ERROR_FILE_NOT_FOUND,
         Globalization::LocaleNameToLCID,
         System::{
             Com::{CoCreateInstance, CLSCTX_INPROC_SERVER},
@@ -83,12 +84,13 @@ impl CLSIDMgr {
 
     pub fn unregister() -> anyhow::Result<()> {
         let clsid_key = CLSID_PREFIX.to_owned() + &GUID_TEXT_SERVICE.to_string();
-        let inproc_key = clsid_key.clone() + INPROC_SUFFIX;
 
-        HKEY_CLASSES_ROOT.delete_tree(&clsid_key)?;
-        HKEY_CLASSES_ROOT.delete_tree(&inproc_key)?;
-
-        Ok(())
+        // The tree includes InprocServer32. A key that is already gone (not
+        // registered, or a repeated unregister) is not an error.
+        match HKEY_CLASSES_ROOT.delete_tree(&clsid_key) {
+            Err(error) if error.code() == ERROR_FILE_NOT_FOUND.to_hresult() => Ok(()),
+            result => Ok(result?),
+        }
     }
 }
 

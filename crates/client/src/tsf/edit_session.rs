@@ -95,6 +95,22 @@ impl<'a, T> ITfEditSession_Impl for EditSession_Impl<'a, T> {
     }
 }
 
+/// Places the caret at `range`. TSF does not take ownership of the range in
+/// the selection, so the reference is released here on every path.
+unsafe fn set_selection(context: &ITfContext, cookie: u32, range: &ITfRange) -> Result<()> {
+    let selections = [TF_SELECTION {
+        range: ManuallyDrop::new(Some(range.clone())),
+        style: TF_SELECTIONSTYLE {
+            ase: TF_AE_NONE,
+            fInterimChar: false.into(),
+        },
+    }];
+    let result = context.SetSelection(cookie, &selections);
+    let [selection] = selections;
+    drop(ManuallyDrop::into_inner(selection.range));
+    Ok(result?)
+}
+
 impl TextServiceFactory {
     #[tracing::instrument]
     pub fn start_composition(&self) -> Result<()> {
@@ -157,15 +173,7 @@ impl TextServiceFactory {
 
                         // put the caret after the committed text
                         range.Collapse(cookie, TF_ANCHOR_END)?;
-                        let selection = TF_SELECTION {
-                            range: ManuallyDrop::new(Some(range.clone())),
-                            style: TF_SELECTIONSTYLE {
-                                ase: TF_AE_NONE,
-                                fInterimChar: false.into(),
-                            },
-                        };
-
-                        context.SetSelection(cookie, &[selection])?;
+                        set_selection(&context, cookie, &range)?;
 
                         composition.EndComposition(cookie)?;
                         Ok(())
@@ -214,15 +222,7 @@ impl TextServiceFactory {
                         }
 
                         range.Collapse(cookie, TF_ANCHOR_END)?;
-                        let selection = TF_SELECTION {
-                            range: ManuallyDrop::new(Some(range.clone())),
-                            style: TF_SELECTIONSTYLE {
-                                ase: TF_AE_NONE,
-                                fInterimChar: false.into(),
-                            },
-                        };
-
-                        context.SetSelection(cookie, &[selection])?;
+                        set_selection(&context, cookie, &range)?;
 
                         Ok(())
                     }
@@ -276,15 +276,7 @@ impl TextServiceFactory {
                         }
 
                         range.Collapse(cookie, TF_ANCHOR_END)?;
-                        let selection = TF_SELECTION {
-                            range: ManuallyDrop::new(Some(range)),
-                            style: TF_SELECTIONSTYLE {
-                                ase: TF_AE_NONE,
-                                fInterimChar: false.into(),
-                            },
-                        };
-
-                        context.SetSelection(cookie, &[selection])?;
+                        set_selection(&context, cookie, &range)?;
 
                         Ok(())
                     }

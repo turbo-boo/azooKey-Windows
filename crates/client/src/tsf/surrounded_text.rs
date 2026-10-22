@@ -129,14 +129,15 @@ impl TextServiceFactory {
                             &mut pfetched,
                         )?;
 
+                        // GetSelection hands over a reference to the range;
+                        // take it so it is released when this closure returns
+                        let [selection] = pselection;
+                        let Some(range) = ManuallyDrop::into_inner(selection.range) else {
+                            return Ok(String::new());
+                        };
                         if pfetched == 0 {
                             return Ok(String::new());
                         }
-
-                        let range = match pselection[0].range.as_ref() {
-                            Some(range) => range.Clone()?,
-                            None => return Ok(String::new()),
-                        };
 
                         let mut preceding_range_shifted = 0;
 

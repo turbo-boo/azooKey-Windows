@@ -41,6 +41,10 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
         let mut text_service = self.borrow_mut()?;
 
         text_service.tid = tid;
+        // Sinks registered below need this object's interfaces. TSF holds a
+        // reference from Activate to Deactivate, so the self-reference kept
+        // until Deactivate does not outlive it.
+        text_service.this = Some(self.interface()?);
         let thread_mgr = ptim.context("Thread manager is null")?;
         text_service.thread_mgr = Some(thread_mgr.clone());
 
@@ -174,6 +178,8 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
         text_service.tid = 0;
         text_service.thread_mgr = None;
         text_service.thread_mgr_sink_cookie = None;
+        // break the self-reference so TSF's release can free this instance
+        text_service.this = None;
         drop(text_service);
 
         // remove reference to the dll instance

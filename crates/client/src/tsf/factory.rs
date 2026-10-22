@@ -4,7 +4,7 @@ use std::{
 };
 
 use windows::{
-    core::{implement, AsImpl, IUnknown, Interface, GUID},
+    core::{implement, IUnknown, Interface, GUID},
     Win32::{
         Foundation::{BOOL, E_NOINTERFACE},
         System::Com::{IClassFactory, IClassFactory_Impl},
@@ -103,10 +103,7 @@ impl TextServiceFactory {
         };
 
         let this = ITfTextInputProcessor::from(factory);
-        let factory = unsafe { this.as_impl() };
-        factory.borrow_mut()?.this = Some(this.clone());
-
-        unsafe { factory.cast::<I>().map_err(|e| anyhow::Error::new(e)) }
+        Ok(this.cast::<I>()?)
     }
 
     pub fn borrow_mut(&self) -> Result<RefMut<TextService>> {
@@ -115,5 +112,12 @@ impl TextServiceFactory {
 
     pub fn borrow(&self) -> Result<Ref<TextService>> {
         Ok(self.text_service.try_borrow()?)
+    }
+}
+
+impl TextServiceFactory_Impl {
+    /// A new reference to this COM object as `I`.
+    pub fn interface<I: Interface>(&self) -> Result<I> {
+        Ok(unsafe { self.cast::<I>()? })
     }
 }

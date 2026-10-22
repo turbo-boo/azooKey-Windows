@@ -645,7 +645,12 @@ impl TextServiceFactory {
         };
 
         for result in results {
-            if let Err(error) = self.apply_magic_result(result) {
+            // The staleness check runs when the edit session does, so a result
+            // queued behind the document lock is still checked against the
+            // composition it would replace.
+            let applied =
+                self.run_outside_key_event(move |factory| factory.apply_magic_result(result));
+            if let Err(error) = applied {
                 tracing::warn!("Failed to show AI conversion candidates: {error:?}");
             }
         }

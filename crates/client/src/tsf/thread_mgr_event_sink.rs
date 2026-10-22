@@ -30,8 +30,9 @@ impl ITfThreadMgrEventSink_Impl for TextServiceFactory_Impl {
             self.borrow_mut()?.advise_text_layout_sink(focus.clone())?;
         }
 
-        let actions = vec![ClientAction::EndComposition];
-        self.handle_action(&actions, CompositionState::None)?;
+        self.run_outside_key_event(|factory| {
+            factory.handle_action(&[ClientAction::EndComposition], CompositionState::None)
+        })?;
 
         Ok(())
     }

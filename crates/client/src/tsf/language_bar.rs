@@ -66,18 +66,22 @@ impl ITfLangBarItem_Impl for TextServiceFactory_Impl {
 impl ITfLangBarItemButton_Impl for TextServiceFactory_Impl {
     #[macros::anyhow]
     fn OnClick(&self, _click: TfLBIClick, _pt: &POINT, _prcarea: *const RECT) -> Result<()> {
-        let mode = {
-            let ime_mode = &IMEState::get()?.input_mode;
-            match ime_mode {
+        self.run_outside_key_event(|factory| {
+            let mode = match IMEState::get()?.input_mode {
                 InputMode::Latin => InputMode::Kana,
                 InputMode::Kana => InputMode::Latin,
+            };
+            // Like the keyboard toggle, commit an active composition first so
+            // TSF and the engine end it together.
+            let composing =
+                factory.borrow()?.borrow_composition()?.state != CompositionState::None;
+            let mut actions = Vec::new();
+            if composing {
+                actions.push(ClientAction::EndComposition);
             }
-        };
-
-        let actions = vec![ClientAction::SetIMEMode(mode)];
-        self.handle_action(&actions, CompositionState::None)?;
-
-        Ok(())
+            actions.push(ClientAction::SetIMEMode(mode));
+            factory.handle_action(&actions, CompositionState::None)
+        })
     }
 
     // this method should not be called

@@ -112,6 +112,46 @@ unsafe fn set_selection(context: &ITfContext, cookie: u32, range: &ITfRange) -> 
 }
 
 impl TextServiceFactory {
+    /// Runs `work` for an event other than a key stroke: a language bar
+    /// click, a focus change or a background result. TSF grants synchronous
+    /// edit sessions only while a key is handled, so the work runs inside an
+    /// asynchronous read/write session on the current document: now if the
+    /// document can be locked, otherwise as soon as it can. The synchronous
+    /// sessions the work requests then nest inside that lock. Without a
+    /// document there is nothing to edit, and the work runs directly.
+    pub fn run_outside_key_event(
+        &self,
+        work: impl FnOnce(&TextServiceFactory) -> Result<()> + 'static,
+    ) -> Result<()> {
+        let (tid, context, this) = {
+            let text_service = self.borrow()?;
+            (
+                text_service.tid,
+                text_service.context.clone(),
+                text_service.this.clone(),
+            )
+        };
+        let (Some(context), Some(this)) = (context, this) else {
+            return work(self);
+        };
+
+        let work = Cell::new(Some(work));
+        run_edit_session(
+            tid,
+            context,
+            Rc::new(move |_cookie| {
+                // `this` keeps the text service alive until a queued session runs
+                let factory: &TextServiceFactory = unsafe { this.as_impl() };
+                match work.take() {
+                    Some(work) => work(factory),
+                    None => Ok(()),
+                }
+            }),
+            TF_ES_ASYNCDONTCARE | TF_ES_READWRITE,
+        )?;
+        Ok(())
+    }
+
     #[tracing::instrument]
     pub fn start_composition(&self) -> Result<()> {
         tracing::debug!("start_composition");

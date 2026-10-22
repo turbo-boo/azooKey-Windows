@@ -15,6 +15,8 @@ pub enum ClientAction {
     AcceptPrediction,
     DismissPredictions,
     MagicConvert,
+    // AI candidates that arrived for the current composition
+    ShowMagicCandidates(Vec<String>),
 
     SetTextWithType(SetTextType),
 

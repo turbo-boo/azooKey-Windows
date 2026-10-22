@@ -149,16 +149,42 @@ fn spawn_window_dispatcher() -> Result<mpsc::UnboundedSender<WindowCommand>> {
     Ok(sender)
 }
 
+async fn connect_converter() -> Result<AzookeyServiceClient<Channel>> {
+    let channel = Endpoint::try_from("http://[::]:50051")?
+        .connect_with_connector(service_fn(|_| open_pipe(r"\\.\pipe\azookey_server")))
+        .await?;
+    Ok(AzookeyServiceClient::new(channel))
+}
+
+/// Requests an AI conversion of `text` on a worker thread with its own
+/// connection, so the TSF thread does not wait for the HTTP API (up to a
+/// minute). `done` runs on the worker thread with the result.
+pub fn magic_convert_in_background(
+    text: String,
+    done: impl FnOnce(Result<Vec<String>>) + Send + 'static,
+) -> Result<()> {
+    std::thread::Builder::new()
+        .name("azookey-magic-convert".to_string())
+        .spawn(move || {
+            let result = current_thread_runtime()
+                .map_err(anyhow::Error::from)
+                .and_then(|runtime| {
+                    runtime.block_on(async {
+                        let mut client = connect_converter().await?;
+                        let request = shared::proto::MagicConvertRequest { text };
+                        Ok(client.magic_convert(request).await?.into_inner().candidates)
+                    })
+                });
+            done(result);
+        })?;
+    Ok(())
+}
+
 impl IPCService {
     pub fn new() -> Result<Self> {
         let runtime = current_thread_runtime()?;
 
-        let server_channel = runtime.block_on(
-            Endpoint::try_from("http://[::]:50051")?
-                .connect_with_connector(service_fn(|_| open_pipe(r"\\.\pipe\azookey_server"))),
-        )?;
-
-        let azookey_client = AzookeyServiceClient::new(server_channel);
+        let azookey_client = runtime.block_on(connect_converter())?;
         tracing::debug!("Connected to server: {:?}", azookey_client);
 
         Ok(Self {
@@ -279,16 +305,6 @@ impl IPCService {
             .clone()
             .block_on(self.azookey_client.clear_post_composition_predictions(request))?;
         Ok(())
-    }
-
-    #[tracing::instrument]
-    pub fn magic_convert(&mut self, text: String) -> anyhow::Result<Vec<String>> {
-        let request = tonic::Request::new(shared::proto::MagicConvertRequest { text });
-        let response = self
-            .runtime
-            .clone()
-            .block_on(self.azookey_client.magic_convert(request))?;
-        Ok(response.into_inner().candidates)
     }
 
     #[tracing::instrument]

@@ -5,7 +5,7 @@ use crate::{
     globals::{DllModule, GUID_DISPLAY_ATTRIBUTE},
 };
 
-use super::factory::TextServiceFactory_Impl;
+use super::{factory::TextServiceFactory_Impl, message_window::MessageWindow};
 use windows::{
     core::Interface as _,
     Win32::{
@@ -45,6 +45,10 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
         // reference from Activate to Deactivate, so the self-reference kept
         // until Deactivate does not outlive it.
         text_service.this = Some(self.interface()?);
+        // without it only F5 (AI conversion) fails; typing is unaffected
+        text_service.message_window = MessageWindow::create(self)
+            .inspect_err(|error| tracing::warn!("Cannot create the message window: {error:?}"))
+            .ok();
         let thread_mgr = ptim.context("Thread manager is null")?;
         text_service.thread_mgr = Some(thread_mgr.clone());
 
@@ -180,6 +184,8 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
         text_service.thread_mgr_sink_cookie = None;
         // break the self-reference so TSF's release can free this instance
         text_service.this = None;
+        // destroys the window; results still in flight are dropped
+        text_service.message_window = None;
         drop(text_service);
 
         // remove reference to the dll instance

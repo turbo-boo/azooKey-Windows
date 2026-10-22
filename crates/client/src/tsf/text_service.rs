@@ -13,6 +13,8 @@ use anyhow::{Context, Result};
 
 use crate::engine::{composition::Composition, input_mode::InputMode};
 
+use super::message_window::MessageWindow;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UpdatePosState {
     #[default]
@@ -79,6 +81,8 @@ pub struct TextService {
     // belong to the instance, not to process-wide state.
     pub thread_mgr_sink_cookie: Option<u32>,
     pub layout_sink: Option<(ITfContext, u32)>,
+    // brings results of background work back to this thread
+    pub message_window: Option<MessageWindow>,
 }
 
 impl TextService {

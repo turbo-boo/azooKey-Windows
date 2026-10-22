@@ -3,12 +3,13 @@ use crate::{
     extension::VKeyExt as _,
     tsf::factory::{TextServiceFactory, TextServiceFactory_Impl},
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
     client_action::{ClientAction, SetSelectionType, SetTextType},
     full_width::{to_fullwidth, to_fullwidth_latin, to_halfwidth},
     input_mode::InputMode,
-    ipc_service::Candidates,
+    ipc_service::{magic_convert_in_background, Candidates},
     state::IMEState,
     text_util::{to_half_katakana, to_katakana},
     user_action::{Function, Navigation},
@@ -26,7 +27,7 @@ use windows::Win32::{
     },
 };
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 
 #[derive(Default, Clone, PartialEq, Debug)]
 pub enum CompositionState {
@@ -52,6 +53,44 @@ pub struct Composition {
 
     pub state: CompositionState,
     pub tip_composition: Option<ITfComposition>,
+    // the AI conversion whose result the composition is waiting for
+    pub magic_request: Option<MagicRequest>,
+}
+
+/// An AI conversion running in the background for the text `source`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MagicRequest {
+    id: u64,
+    source: String,
+}
+
+#[derive(Debug)]
+pub struct MagicResult {
+    request: MagicRequest,
+    candidates: Result<Vec<String>>,
+}
+
+static NEXT_MAGIC_REQUEST: AtomicU64 = AtomicU64::new(0);
+
+/// The text sent for AI conversion: what the composition currently shows.
+fn magic_source(preview: &str, suffix: &str, raw_hiragana: &str) -> String {
+    if preview.is_empty() {
+        raw_hiragana.to_string()
+    } else {
+        format!("{preview}{suffix}")
+    }
+}
+
+/// Whether the composition still waits for `request`: the user may have typed,
+/// committed or pressed F5 again while the AI conversion was running.
+fn magic_result_is_current(composition: &Composition, request: &MagicRequest) -> bool {
+    composition.state != CompositionState::None
+        && composition.magic_request.as_ref() == Some(request)
+        && magic_source(
+            &composition.preview,
+            &composition.suffix,
+            &composition.raw_hiragana,
+        ) == request.source
 }
 
 impl ITfCompositionSink_Impl for TextServiceFactory_Impl {
@@ -574,6 +613,49 @@ impl TextServiceFactory {
         Ok(true)
     }
 
+    /// Applies AI conversion results queued by the background requests.
+    /// Runs on the TSF thread, from the text service's message window.
+    pub fn deliver_magic_results(&self) {
+        let results = match self.borrow() {
+            Ok(text_service) => match text_service.message_window.as_ref() {
+                Some(window) => window.take_results(),
+                None => return,
+            },
+            Err(error) => {
+                // left queued; the next delivery picks them up
+                tracing::warn!("Cannot deliver AI conversion results now: {error:?}");
+                return;
+            }
+        };
+
+        for result in results {
+            if let Err(error) = self.apply_magic_result(result) {
+                tracing::warn!("Failed to show AI conversion candidates: {error:?}");
+            }
+        }
+    }
+
+    fn apply_magic_result(&self, result: MagicResult) -> Result<()> {
+        let composition = self.borrow()?.borrow_composition()?.clone();
+        if !magic_result_is_current(&composition, &result.request) {
+            tracing::debug!("Dropping AI conversion result for an outdated composition");
+            return Ok(());
+        }
+
+        let converted = match result.candidates {
+            Ok(converted) if !converted.is_empty() => converted,
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                tracing::warn!("Magic conversion failed: {error:?}");
+                return Ok(());
+            }
+        };
+        self.handle_action(
+            &[ClientAction::ShowMagicCandidates(converted)],
+            composition.state,
+        )
+    }
+
     #[tracing::instrument]
     pub fn handle_action(
         &self,
@@ -596,6 +678,7 @@ impl TextServiceFactory {
         let mut candidates = composition.candidates.clone();
         let mut should_learn_candidate = composition.should_learn_candidate;
         let mut selection_index = composition.selection_index;
+        let mut magic_request = composition.magic_request.clone();
         let mut ipc_service = IMEState::ipc_service()?;
         let mut transition = transition;
 
@@ -843,41 +926,51 @@ impl TextServiceFactory {
                     ipc_service.set_candidates(vec![])?;
                 }
                 ClientAction::MagicConvert => {
-                    let source = if preview.is_empty() {
-                        raw_hiragana.clone()
-                    } else {
-                        format!("{preview}{suffix}")
+                    // The HTTP API can take up to a minute: request it in the
+                    // background and show the candidates when they arrive
+                    // (ShowMagicCandidates), unless the composition changed.
+                    let source = magic_source(&preview, &suffix, &raw_hiragana);
+                    let request = MagicRequest {
+                        id: NEXT_MAGIC_REQUEST.fetch_add(1, Ordering::Relaxed),
+                        source: source.clone(),
                     };
-                    let converted = match ipc_service.magic_convert(source) {
-                        Ok(converted) => converted,
-                        Err(error) => {
-                            tracing::warn!("Magic conversion failed: {error:?}");
-                            continue;
-                        }
+                    let sender = self
+                        .borrow()?
+                        .message_window
+                        .as_ref()
+                        .context("message window is not available")?
+                        .sender();
+                    magic_request = Some(request.clone());
+                    magic_convert_in_background(source, move |candidates| {
+                        sender.send(MagicResult {
+                            request,
+                            candidates,
+                        })
+                    })?;
+                }
+                ClientAction::ShowMagicCandidates(converted) => {
+                    magic_request = None;
+                    // The AI candidate replaces the whole composition, so it
+                    // covers every input unit (not the number of kana).
+                    let count = candidates.input_count;
+                    candidates = Candidates {
+                        texts: converted.clone(),
+                        sub_texts: vec![String::new(); converted.len()],
+                        hiragana: raw_hiragana.clone(),
+                        corresponding_count: vec![count; converted.len()],
+                        candidate_ids: vec![],
+                        is_converted: true,
+                        input_count: count,
                     };
-                    if !converted.is_empty() {
-                        // The AI candidate replaces the whole composition, so it
-                        // covers every input unit (not the number of kana).
-                        let count = candidates.input_count;
-                        candidates = Candidates {
-                            texts: converted.clone(),
-                            sub_texts: vec![String::new(); converted.len()],
-                            hiragana: raw_hiragana.clone(),
-                            corresponding_count: vec![count; converted.len()],
-                            candidate_ids: vec![],
-                            is_converted: true,
-                            input_count: count,
-                        };
-                        selection_index = 0;
-                        corresponding_count = count;
-                        preview = converted[0].clone();
-                        suffix.clear();
-                        should_learn_candidate = false;
-                        self.set_text(&preview, "")?;
-                        ipc_service.set_candidates(candidates.texts.clone())?;
-                        ipc_service.set_selection(0)?;
-                        ipc_service.show_window()?;
-                    }
+                    selection_index = 0;
+                    corresponding_count = count;
+                    preview = converted.first().cloned().unwrap_or_default();
+                    suffix.clear();
+                    should_learn_candidate = false;
+                    self.set_text(&preview, "")?;
+                    ipc_service.set_candidates(candidates.texts.clone())?;
+                    ipc_service.set_selection(0)?;
+                    ipc_service.show_window()?;
                 }
                 ClientAction::RemoveText => {
                     candidates = ipc_service.remove_text()?;
@@ -1103,6 +1196,7 @@ impl TextServiceFactory {
         composition.should_learn_candidate = should_learn_candidate;
         composition.suffix = suffix.clone();
         composition.corresponding_count = corresponding_count;
+        composition.magic_request = magic_request;
 
         Ok(())
     }
@@ -1112,7 +1206,8 @@ impl TextServiceFactory {
 mod tests {
     use super::{
         candidate_is_learnable, candidate_parts, conversion_key_action, is_alt_backquote_key,
-        next_selection_index, view_after_remove,
+        magic_result_is_current, next_selection_index, view_after_remove, Composition,
+        CompositionState, MagicRequest,
     };
     use crate::engine::{
         client_action::{ClientAction, SetSelectionType},
@@ -1232,5 +1327,41 @@ mod tests {
         assert_eq!(view.sub_text, "");
         // committing it later must consume all of the remaining input
         assert_eq!(view.corresponding_count, 3);
+    }
+
+    #[test]
+    fn ai_result_applies_only_to_the_composition_that_requested_it() {
+        let request = MagicRequest {
+            id: 1,
+            source: "きょう".to_string(),
+        };
+        let waiting = Composition {
+            raw_hiragana: "きょう".to_string(),
+            state: CompositionState::Composing,
+            magic_request: Some(request.clone()),
+            ..Composition::default()
+        };
+        assert!(magic_result_is_current(&waiting, &request));
+
+        // typed another character while waiting
+        let typed = Composition {
+            raw_hiragana: "きょうは".to_string(),
+            ..waiting.clone()
+        };
+        assert!(!magic_result_is_current(&typed, &request));
+
+        // pressed F5 again: only the newer request's result is shown
+        let newer = Composition {
+            magic_request: Some(MagicRequest { id: 2, ..request.clone() }),
+            ..waiting.clone()
+        };
+        assert!(!magic_result_is_current(&newer, &request));
+
+        // committed or cancelled
+        let ended = Composition {
+            state: CompositionState::None,
+            ..waiting
+        };
+        assert!(!magic_result_is_current(&ended, &request));
     }
 }

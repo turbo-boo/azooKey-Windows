@@ -70,6 +70,9 @@ impl UpdatePosState {
 #[derive(Default, Debug)]
 pub struct TextService {
     pub tid: u32,
+    // changes on every Activate and Deactivate, so work queued during one
+    // activation can tell it no longer applies
+    pub activation: u64,
     pub thread_mgr: Option<ITfThreadMgr>,
     pub context: Option<ITfContext>,
     pub composition: RefCell<Composition>,

@@ -41,6 +41,7 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
         let mut text_service = self.borrow_mut()?;
 
         text_service.tid = tid;
+        text_service.activation += 1;
         // Sinks registered below need this object's interfaces. TSF holds a
         // reference from Activate to Deactivate, so the self-reference kept
         // until Deactivate does not outlive it.
@@ -180,6 +181,7 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
 
         text_service.display_attribute_atom.clear();
         text_service.tid = 0;
+        text_service.activation += 1;
         text_service.thread_mgr = None;
         text_service.thread_mgr_sink_cookie = None;
         // break the self-reference so TSF's release can free this instance

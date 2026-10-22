@@ -111,45 +111,84 @@ unsafe fn set_selection(context: &ITfContext, cookie: u32, range: &ITfRange) -> 
     Ok(result?)
 }
 
+/// The document holding `composition`. The text service's own context follows
+/// the last key event and can already belong to another document.
+fn composition_context(composition: &ITfComposition) -> Result<ITfContext> {
+    Ok(unsafe { composition.GetRange()?.GetContext()? })
+}
+
 impl TextServiceFactory {
     /// Runs `work` for an event other than a key stroke: a language bar
-    /// click, a focus change or a background result. TSF grants synchronous
-    /// edit sessions only while a key is handled, so the work runs inside an
-    /// asynchronous read/write session on the current document: now if the
-    /// document can be locked, otherwise as soon as it can. The synchronous
-    /// sessions the work requests then nest inside that lock. Without a
-    /// document there is nothing to edit, and the work runs directly.
+    /// click, a focus change or a background result.
+    ///
+    /// Without a TSF composition nothing in the document needs editing, so
+    /// the work runs right away. With one, ending or rewriting it needs a
+    /// read/write lock, which TSF grants synchronously only while a key is
+    /// handled; the work then runs inside an asynchronous read/write session
+    /// on the composition's document, now if possible and otherwise once the
+    /// document can be locked, and the synchronous sessions it requests nest
+    /// inside that lock. A queued session does nothing if the text service was
+    /// deactivated or moved on to another composition in the meantime. If the
+    /// document refuses the session (read-only, closed), the composition
+    /// cannot be edited any more: it is let go and the work runs right away.
     pub fn run_outside_key_event(
         &self,
         work: impl FnOnce(&TextServiceFactory) -> Result<()> + 'static,
     ) -> Result<()> {
-        let (tid, context, this) = {
+        let (tid, activation, this, composition) = {
             let text_service = self.borrow()?;
+            let composition = text_service.borrow_composition()?.tip_composition.clone();
             (
                 text_service.tid,
-                text_service.context.clone(),
+                text_service.activation,
                 text_service.this.clone(),
+                composition,
             )
         };
-        let (Some(context), Some(this)) = (context, this) else {
+        let (Some(this), Some(composition)) = (this, composition) else {
             return work(self);
         };
 
-        let work = Cell::new(Some(work));
-        run_edit_session(
-            tid,
-            context,
-            Rc::new(move |_cookie| {
-                // `this` keeps the text service alive until a queued session runs
-                let factory: &TextServiceFactory = unsafe { this.as_impl() };
-                match work.take() {
-                    Some(work) => work(factory),
-                    None => Ok(()),
-                }
-            }),
-            TF_ES_ASYNCDONTCARE | TF_ES_READWRITE,
-        )?;
-        Ok(())
+        let work = Rc::new(Cell::new(Some(work)));
+        let queued = work.clone();
+        let requested = composition_context(&composition).and_then(|context| {
+            run_edit_session(
+                tid,
+                context,
+                Rc::new(move |_cookie| {
+                    // `this` only keeps the object alive until a queued session
+                    // runs; whether the work still applies is checked here.
+                    let factory: &TextServiceFactory = unsafe { this.as_impl() };
+                    let current = {
+                        let text_service = factory.borrow()?;
+                        let tip_composition =
+                            text_service.borrow_composition()?.tip_composition.clone();
+                        text_service.activation == activation
+                            && tip_composition.as_ref() == Some(&composition)
+                    };
+                    match queued.take() {
+                        Some(work) if current => work(factory),
+                        _ => {
+                            tracing::debug!("Dropping work for an outdated composition");
+                            Ok(())
+                        }
+                    }
+                }),
+                TF_ES_ASYNCDONTCARE | TF_ES_READWRITE,
+            )
+        });
+
+        match (requested, work.take()) {
+            (Ok(_), _) => Ok(()),
+            // the session ran and the work itself failed
+            (Err(error), None) => Err(error),
+            // the document refused the session; the work has not run
+            (Err(error), Some(work)) => {
+                tracing::warn!("Cannot edit the composition any more: {error:?}");
+                self.borrow()?.borrow_mut_composition()?.tip_composition = None;
+                work(self)
+            }
+        }
     }
 
     #[tracing::instrument]
@@ -197,9 +236,9 @@ impl TextServiceFactory {
         if let Some(composition) = text_service.borrow_composition()?.tip_composition.clone() {
             edit_session(
                 text_service.tid,
-                text_service.context()?,
+                composition_context(&composition)?,
                 Rc::new({
-                    let context = text_service.context::<ITfContext>()?;
+                    let context = composition_context(&composition)?;
 
                     move |cookie| unsafe {
                         // The text already in the composition is what gets
@@ -233,14 +272,14 @@ impl TextServiceFactory {
         if let Some(composition) = text_service.borrow_composition()?.tip_composition.clone() {
             edit_session(
                 text_service.tid,
-                text_service.context()?,
+                composition_context(&composition)?,
                 Rc::new({
                     // TSF positions count UTF-16 code units
                     let text_len = text.encode_utf16().count() as i32;
 
                     // unpadded is all you need!
                     let text = format!("{text}{subtext}").as_str().to_wide_16_unpadded();
-                    let context = text_service.context::<ITfContext>()?;
+                    let context = composition_context(&composition)?;
                     let display_attribute_atom = text_service.display_attribute_atom.clone();
 
                     move |cookie| unsafe {
@@ -280,12 +319,12 @@ impl TextServiceFactory {
         if let Some(composition) = text_service.borrow_composition()?.tip_composition.clone() {
             edit_session(
                 text_service.tid,
-                text_service.context()?,
+                composition_context(&composition)?,
                 Rc::new({
                     // TSF positions count UTF-16 code units
                     let text_len = text.encode_utf16().count() as i32;
                     let subtext = subtext.to_wide_16_unpadded();
-                    let context = text_service.context::<ITfContext>()?;
+                    let context = composition_context(&composition)?;
                     let display_attribute_atom = text_service.display_attribute_atom.clone();
 
                     move |cookie| unsafe {

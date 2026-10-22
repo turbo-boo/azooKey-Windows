@@ -27,9 +27,9 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
     fn Activate(&self, ptim: Option<&ITfThreadMgr>, tid: u32) -> Result<()> {
         tracing::debug!("Activated with tid: {tid}");
 
-        // add reference to the dll instance to prevent it from being unloaded
-        let mut dll_instance = DllModule::get()?;
-        dll_instance.add_ref();
+        // add reference to the dll instance to prevent it from being unloaded;
+        // the lock is released at once (MessageWindow::create takes it again)
+        DllModule::get()?.add_ref();
 
         // Connect eagerly when possible. If the server is not up yet (e.g. right
         // after logon), keep activating: IMEState::ipc_service() reconnects on
@@ -214,5 +214,41 @@ impl ITfTextInputProcessorEx_Impl for TextServiceFactory_Impl {
         tracing::debug!("Activated(Ex) with tid: {tid}");
         self.Activate(ptim, tid)?;
         Ok(())
+    }
+}
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{mpsc, Mutex},
+        time::Duration,
+    };
+
+    use windows::Win32::{
+        System::LibraryLoader::GetModuleHandleW, UI::TextServices::ITfTextInputProcessor,
+    };
+
+    use crate::{
+        globals::{DllModule, DLL_INSTANCE},
+        tsf::factory::TextServiceFactory,
+    };
+
+    #[test]
+    fn activate_returns_instead_of_waiting_on_its_own_lock() {
+        let (done, finished) = mpsc::channel();
+        // COM objects stay on the thread that created them
+        std::thread::spawn(move || {
+            let mut dll = DllModule::new();
+            dll.hinst = Some(unsafe { GetModuleHandleW(None) }.unwrap());
+            let _ = DLL_INSTANCE.set(Mutex::new(dll));
+
+            let tip: ITfTextInputProcessor = TextServiceFactory::create().unwrap();
+            // Without a thread manager Activate fails, but only after it has
+            // taken every lock it uses (DLL module, message window).
+            let result = unsafe { tip.Activate(None, 1) };
+            done.send(result.is_err()).unwrap();
+        });
+
+        let returned = finished.recv_timeout(Duration::from_secs(30));
+        assert_eq!(returned, Ok(true), "Activate did not return");
     }
 }

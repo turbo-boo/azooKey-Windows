@@ -116,21 +116,18 @@ impl TextServiceFactory {
     pub fn start_composition(&self) -> Result<()> {
         tracing::debug!("start_composition");
 
-        let text_service = self.borrow_mut()?;
+        // end_composition borrows the text service itself, so check without
+        // holding a borrow
+        let tip_exists = self.borrow()?.borrow_composition()?.tip_composition.is_some();
+        if tip_exists {
+            self.end_composition()?;
+        }
+
+        let text_service = self.borrow()?;
         let context = text_service.context()?;
         let context_composition = text_service.context::<ITfContextComposition>()?;
         let sink = text_service.this::<ITfCompositionSink>()?;
         let insert = text_service.context::<ITfInsertAtSelection>()?;
-
-        let tip_exists = {
-            let composition = text_service.borrow_composition()?;
-            composition.tip_composition.is_some()
-        };
-
-        if tip_exists {
-            self.end_composition()?;
-            return Ok(());
-        }
 
         let composition = edit_session::<ITfComposition>(
             text_service.tid,

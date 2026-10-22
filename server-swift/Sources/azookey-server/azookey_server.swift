@@ -74,10 +74,13 @@ import ffi
 
 @MainActor func getOptions(
     context: String = "",
-    shouldResetMemory: Bool = false
+    shouldResetMemory: Bool = false,
+    requestRichCandidates: Bool = false
 ) -> ConvertRequestOptions {
     return ConvertRequestOptions(
-        requireJapanesePrediction: true,
+        // As in azooKey-Desktop: prediction candidates mixed into the
+        // conversion results would replace what was typed (と -> とか).
+        requireJapanesePrediction: false,
         requireEnglishPrediction: false,
         keyboardLanguage: .ja_JP,
         learningType: getLearningType(),
@@ -92,7 +95,7 @@ import ffi
         zenzaiMode: config["enable"] as! Bool ? .on(
             weight: execURL.appendingPathComponent("zenz.gguf"),
             inferenceLimit: 1,
-            requestRichCandidates: true,
+            requestRichCandidates: requestRichCandidates,
             personalizationMode: getPersonalizationMode(),
             versionDependentMode: .v3(
                 .init(
@@ -413,10 +416,13 @@ public func free_candidates(
 }
 
 @_silgen_name("GetComposedText")
-@MainActor public func get_composed_text(lengthPtr: UnsafeMutablePointer<Int32>) -> UnsafeMutablePointer<UnsafeMutablePointer<FFICandidate>?> {
+@MainActor public func get_composed_text(
+    lengthPtr: UnsafeMutablePointer<Int32>,
+    requestRichCandidates: Bool
+) -> UnsafeMutablePointer<UnsafeMutablePointer<FFICandidate>?> {
     let hiragana = composingText.convertTarget
     let contextString = (config["context"] as? String) ?? ""
-    let options = getOptions(context: contextString)
+    let options = getOptions(context: contextString, requestRichCandidates: requestRichCandidates)
     let converted = converter.requestCandidates(composingText, options: options)
     lastCandidates = converted.mainResults
     var result: [FFICandidate] = []

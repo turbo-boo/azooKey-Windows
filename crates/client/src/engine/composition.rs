@@ -1172,8 +1172,8 @@ mod tests {
 
     #[test]
     fn backspace_shows_first_candidate_of_the_fresh_list() {
-        // Live conversion off: after Backspace the converter returns only the
-        // unconverted text, even if the 3rd candidate was selected before.
+        // After Backspace the server returns only the unconverted text (as
+        // azooKey-Desktop does), even if the 3rd candidate was selected before.
         let after_remove = Candidates {
             texts: vec!["きょう".to_string()],
             sub_texts: vec![String::new()],

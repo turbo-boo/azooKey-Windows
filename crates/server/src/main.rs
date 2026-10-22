@@ -1,3 +1,4 @@
+use azookey_server::presentation::{presentation, CompositionEdit, Presentation};
 use azookey_server::TonicNamedPipeServer;
 use tonic::{transport::Server, Request, Response, Status};
 use tonic_reflection::server::Builder as ReflectionBuilder;
@@ -44,7 +45,7 @@ unsafe extern "C" {
     fn MoveCursor(offset: c_int, cursorPtr: *mut c_int) -> *mut c_char;
     fn ShrinkText(offset: c_int) -> *mut c_char;
     fn ClearText();
-    fn GetComposedText(lengthPtr: *mut c_int) -> *mut *mut FFICandidate;
+    fn GetComposedText(lengthPtr: *mut c_int, requestRichCandidates: bool) -> *mut *mut FFICandidate;
     fn CommitCandidate(candidateIndex: c_int);
     fn FlushLearning();
     fn ResetLearning();
@@ -142,10 +143,10 @@ fn clear_text() {
     }
 }
 
-fn get_composed_text() -> Vec<Suggestion> {
+fn get_composed_text(rich_candidates: bool) -> Vec<Suggestion> {
     let candidates = unsafe {
         let mut length: c_int = 0;
-        let result = GetComposedText(&mut length);
+        let result = GetComposedText(&mut length, rich_candidates);
         take_candidates(result, length)
     };
 
@@ -172,11 +173,12 @@ fn refresh_runtime_config() {
     );
 }
 
-fn composing_text_response(raw: RawComposingText, force_conversion: bool) -> ComposingText {
-    let is_converted =
-        force_conversion || LIVE_CONVERSION_ENABLED.load(Ordering::Relaxed);
-    let suggestions = if is_converted {
-        get_composed_text()
+fn composing_text_response(raw: RawComposingText, edit: CompositionEdit) -> ComposingText {
+    let live_conversion = LIVE_CONVERSION_ENABLED.load(Ordering::Relaxed);
+    let shown = presentation(edit, live_conversion, &raw.text);
+    let is_converted = matches!(shown, Presentation::Converted { .. });
+    let suggestions = if let Presentation::Converted { rich_candidates } = shown {
+        get_composed_text(rich_candidates)
     } else if raw.text.is_empty() {
         vec![]
     } else {
@@ -302,7 +304,7 @@ impl AzookeyService for MyAzookeyService {
         let composing_text = add_text(&input);
 
         Ok(Response::new(AppendTextResponse {
-            composing_text: Some(composing_text_response(composing_text, false)),
+            composing_text: Some(composing_text_response(composing_text, CompositionEdit::Typed)),
         }))
     }
 
@@ -313,7 +315,7 @@ impl AzookeyService for MyAzookeyService {
         let composing_text = remove_text();
 
         Ok(Response::new(RemoveTextResponse {
-            composing_text: Some(composing_text_response(composing_text, false)),
+            composing_text: Some(composing_text_response(composing_text, CompositionEdit::Deleted)),
         }))
     }
 
@@ -325,7 +327,7 @@ impl AzookeyService for MyAzookeyService {
         let composing_text = move_cursor(offset);
 
         Ok(Response::new(MoveCursorResponse {
-            composing_text: Some(composing_text_response(composing_text, false)),
+            composing_text: Some(composing_text_response(composing_text, CompositionEdit::Typed)),
         }))
     }
 
@@ -345,7 +347,10 @@ impl AzookeyService for MyAzookeyService {
         let composing_text = shrink_text(offset);
 
         Ok(Response::new(ShrinkTextResponse {
-            composing_text: Some(composing_text_response(composing_text, true)),
+            composing_text: Some(composing_text_response(
+                composing_text,
+                CompositionEdit::ConversionRequested,
+            )),
         }))
     }
 
@@ -355,7 +360,10 @@ impl AzookeyService for MyAzookeyService {
     ) -> Result<Response<RequestConversionResponse>, Status> {
         let composing_text = move_cursor(0);
         Ok(Response::new(RequestConversionResponse {
-            composing_text: Some(composing_text_response(composing_text, true)),
+            composing_text: Some(composing_text_response(
+                composing_text,
+                CompositionEdit::ConversionRequested,
+            )),
         }))
     }
 

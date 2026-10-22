@@ -93,6 +93,22 @@ fn magic_result_is_current(composition: &Composition, request: &MagicRequest) ->
         ) == request.source
 }
 
+/// The AI conversion still awaited after a key produced `actions`. Any handled
+/// key (typing, Backspace, Escape, commit, selection) withdraws the pending
+/// request, so its result cannot rewrite a composition the user has since
+/// edited or replaced, even one showing the same text. Keys that produce no
+/// action keep it; MagicConvert then sets a new one.
+fn pending_magic_request(
+    current: &Option<MagicRequest>,
+    actions: &[ClientAction],
+) -> Option<MagicRequest> {
+    if actions.is_empty() {
+        current.clone()
+    } else {
+        None
+    }
+}
+
 impl ITfCompositionSink_Impl for TextServiceFactory_Impl {
     #[macros::anyhow]
     fn OnCompositionTerminated(
@@ -678,7 +694,7 @@ impl TextServiceFactory {
         let mut candidates = composition.candidates.clone();
         let mut should_learn_candidate = composition.should_learn_candidate;
         let mut selection_index = composition.selection_index;
-        let mut magic_request = composition.magic_request.clone();
+        let mut magic_request = pending_magic_request(&composition.magic_request, actions);
         let mut ipc_service = IMEState::ipc_service()?;
         let mut transition = transition;
 
@@ -1206,8 +1222,8 @@ impl TextServiceFactory {
 mod tests {
     use super::{
         candidate_is_learnable, candidate_parts, conversion_key_action, is_alt_backquote_key,
-        magic_result_is_current, next_selection_index, view_after_remove, Composition,
-        CompositionState, MagicRequest,
+        magic_result_is_current, next_selection_index, pending_magic_request, view_after_remove,
+        Composition, CompositionState, MagicRequest,
     };
     use crate::engine::{
         client_action::{ClientAction, SetSelectionType},
@@ -1363,5 +1379,36 @@ mod tests {
             ..waiting
         };
         assert!(!magic_result_is_current(&ended, &request));
+    }
+
+    #[test]
+    fn ai_result_is_dropped_after_cancelling_and_retyping_the_same_text() {
+        let request = MagicRequest {
+            id: 1,
+            source: "か".to_string(),
+        };
+        let waiting = Some(request.clone());
+
+        // F5 on "か", then Escape before the result arrives
+        let after_escape =
+            pending_magic_request(&waiting, &[ClientAction::CancelComposition]);
+        // typing "か" again starts a new composition showing the same text
+        let after_retyping = pending_magic_request(
+            &after_escape,
+            &[
+                ClientAction::StartComposition,
+                ClientAction::AppendText("k".to_string()),
+            ],
+        );
+        let retyped = Composition {
+            raw_hiragana: "か".to_string(),
+            state: CompositionState::Composing,
+            magic_request: after_retyping,
+            ..Composition::default()
+        };
+        assert!(!magic_result_is_current(&retyped, &request));
+
+        // a key that does nothing (e.g. Left while composing) keeps waiting
+        assert_eq!(pending_magic_request(&waiting, &[]), waiting);
     }
 }

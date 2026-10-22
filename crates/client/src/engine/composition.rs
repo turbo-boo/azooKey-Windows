@@ -1,7 +1,10 @@
 use crate::{
     engine::user_action::UserAction,
     extension::VKeyExt as _,
-    tsf::factory::{TextServiceFactory, TextServiceFactory_Impl},
+    tsf::{
+        edit_session::IfRefused,
+        factory::{TextServiceFactory, TextServiceFactory_Impl},
+    },
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -648,8 +651,12 @@ impl TextServiceFactory {
             // The staleness check runs when the edit session does, so a result
             // queued behind the document lock is still checked against the
             // composition it would replace.
-            let applied =
-                self.run_outside_key_event(move |factory| factory.apply_magic_result(result));
+            // An AI result that cannot be written into the document is
+            // dropped: showing it would let Enter commit text the document
+            // never received.
+            let applied = self.run_outside_key_event(IfRefused::Skip, move |factory| {
+                factory.apply_magic_result(result)
+            });
             if let Err(error) = applied {
                 tracing::warn!("Failed to show AI conversion candidates: {error:?}");
             }

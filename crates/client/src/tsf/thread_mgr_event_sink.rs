@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use crate::engine::{client_action::ClientAction, composition::CompositionState};
 
-use super::factory::TextServiceFactory_Impl;
+use super::{edit_session::IfRefused, factory::TextServiceFactory_Impl};
 
 impl ITfThreadMgrEventSink_Impl for TextServiceFactory_Impl {
     #[macros::anyhow]
@@ -30,7 +30,7 @@ impl ITfThreadMgrEventSink_Impl for TextServiceFactory_Impl {
             self.borrow_mut()?.advise_text_layout_sink(focus.clone())?;
         }
 
-        self.run_outside_key_event(|factory| {
+        self.run_outside_key_event(IfRefused::RunWithoutComposition, |factory| {
             factory.handle_action(&[ClientAction::EndComposition], CompositionState::None)
         })?;
 

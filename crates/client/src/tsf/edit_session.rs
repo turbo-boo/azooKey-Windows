@@ -117,6 +117,16 @@ fn composition_context(composition: &ITfComposition) -> Result<ITfContext> {
     Ok(unsafe { composition.GetRange()?.GetContext()? })
 }
 
+/// What [`TextServiceFactory::run_outside_key_event`] does when the document
+/// refuses to be edited.
+#[derive(Clone, Copy, Debug)]
+pub enum IfRefused {
+    /// Let go of the composition and run the work anyway.
+    RunWithoutComposition,
+    /// Drop the work.
+    Skip,
+}
+
 impl TextServiceFactory {
     /// Runs `work` for an event other than a key stroke: a language bar
     /// click, a focus change or a background result.
@@ -128,11 +138,15 @@ impl TextServiceFactory {
     /// on the composition's document, now if possible and otherwise once the
     /// document can be locked, and the synchronous sessions it requests nest
     /// inside that lock. A queued session does nothing if the text service was
-    /// deactivated or moved on to another composition in the meantime. If the
-    /// document refuses the session (read-only, closed), the composition
-    /// cannot be edited any more: it is let go and the work runs right away.
+    /// deactivated or moved on to another composition in the meantime.
+    ///
+    /// If the document refuses the session (read-only, closed), the
+    /// composition cannot be edited any more. `if_refused` decides whether the
+    /// work still runs without it: state changes such as a mode switch should,
+    /// work that only rewrites the composition should not.
     pub fn run_outside_key_event(
         &self,
+        if_refused: IfRefused,
         work: impl FnOnce(&TextServiceFactory) -> Result<()> + 'static,
     ) -> Result<()> {
         let (tid, activation, this, composition) = {
@@ -178,16 +192,23 @@ impl TextServiceFactory {
             )
         });
 
-        match (requested, work.take()) {
-            (Ok(_), _) => Ok(()),
+        let error = match requested {
+            // ran now, or queued: the session takes the work when it runs
+            Ok(_) => return Ok(()),
+            Err(error) => error,
+        };
+        let Some(work) = work.take() else {
             // the session ran and the work itself failed
-            (Err(error), None) => Err(error),
-            // the document refused the session; the work has not run
-            (Err(error), Some(work)) => {
-                tracing::warn!("Cannot edit the composition any more: {error:?}");
+            return Err(error);
+        };
+        // the document refused the session; the work has not run
+        tracing::warn!("Cannot edit the composition any more: {error:?}");
+        match if_refused {
+            IfRefused::RunWithoutComposition => {
                 self.borrow()?.borrow_mut_composition()?.tip_composition = None;
                 work(self)
             }
+            IfRefused::Skip => Ok(()),
         }
     }
 

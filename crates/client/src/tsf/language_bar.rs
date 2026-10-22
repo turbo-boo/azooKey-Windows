@@ -24,7 +24,7 @@ use crate::{
 
 use anyhow::{Context as _, Result};
 
-use super::factory::TextServiceFactory_Impl;
+use super::{edit_session::IfRefused, factory::TextServiceFactory_Impl};
 
 const INFO: TF_LANGBARITEMINFO = TF_LANGBARITEMINFO {
     clsidService: GUID_TEXT_SERVICE,
@@ -66,7 +66,7 @@ impl ITfLangBarItem_Impl for TextServiceFactory_Impl {
 impl ITfLangBarItemButton_Impl for TextServiceFactory_Impl {
     #[macros::anyhow]
     fn OnClick(&self, _click: TfLBIClick, _pt: &POINT, _prcarea: *const RECT) -> Result<()> {
-        self.run_outside_key_event(|factory| {
+        self.run_outside_key_event(IfRefused::RunWithoutComposition, |factory| {
             let mode = match IMEState::get()?.input_mode {
                 InputMode::Latin => InputMode::Kana,
                 InputMode::Kana => InputMode::Latin,

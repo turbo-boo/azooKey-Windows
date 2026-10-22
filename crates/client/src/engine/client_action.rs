@@ -18,7 +18,6 @@ pub enum ClientAction {
 
     SetTextWithType(SetTextType),
 
-    MoveCursor(i32),
     SetSelection(SetSelectionType),
 
     SetIMEMode(InputMode),

@@ -318,14 +318,9 @@ impl TextServiceFactory {
                     vec![ClientAction::CancelComposition],
                 ),
                 UserAction::Navigation(direction) => match direction {
-                    Navigation::Right => (
-                        CompositionState::Composing,
-                        vec![ClientAction::MoveCursor(1)],
-                    ),
-                    Navigation::Left => (
-                        CompositionState::Composing,
-                        vec![ClientAction::MoveCursor(-1)],
-                    ),
+                    // azooKey-Desktop consumes Left/Right while composing; the
+                    // caret stays at the end of the composition.
+                    Navigation::Right | Navigation::Left => (CompositionState::Composing, vec![]),
                     Navigation::Up => (
                         CompositionState::Previewing,
                         vec![ClientAction::SetSelection(SetSelectionType::Up)],
@@ -431,14 +426,8 @@ impl TextServiceFactory {
                     vec![ClientAction::CancelComposition],
                 ),
                 UserAction::Navigation(direction) => match direction {
-                    Navigation::Right => (
-                        CompositionState::Composing,
-                        vec![ClientAction::MoveCursor(1)],
-                    ),
-                    Navigation::Left => (
-                        CompositionState::Composing,
-                        vec![ClientAction::MoveCursor(-1)],
-                    ),
+                    // consumed without moving, as in Composing
+                    Navigation::Right | Navigation::Left => (CompositionState::Previewing, vec![]),
                     Navigation::Up => (
                         CompositionState::Previewing,
                         vec![ClientAction::SetSelection(SetSelectionType::Up)],
@@ -924,10 +913,6 @@ impl TextServiceFactory {
                         ipc_service.hide_window()?;
                         ipc_service.set_candidates(vec![])?;
                     }
-                }
-                ClientAction::MoveCursor(_offset) => {
-                    // TODO: I'll use azookey-kkc's composingText
-                    // self.set_cursor(offset)?;
                 }
                 ClientAction::SetIMEMode(mode) => {
                     self.start_composition()?;

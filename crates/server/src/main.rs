@@ -45,6 +45,7 @@ unsafe extern "C" {
     fn MoveCursor(offset: c_int, cursorPtr: *mut c_int) -> *mut c_char;
     fn ShrinkText(offset: c_int) -> *mut c_char;
     fn ClearText();
+    fn GetInputCount() -> c_int;
     fn GetComposedText(lengthPtr: *mut c_int, requestRichCandidates: bool) -> *mut *mut FFICandidate;
     fn CommitCandidate(candidateIndex: c_int);
     fn FlushLearning();
@@ -177,6 +178,7 @@ fn composing_text_response(raw: RawComposingText, edit: CompositionEdit) -> Comp
     let live_conversion = LIVE_CONVERSION_ENABLED.load(Ordering::Relaxed);
     let shown = presentation(edit, live_conversion, &raw.text);
     let is_converted = matches!(shown, Presentation::Converted { .. });
+    let input_count = unsafe { GetInputCount() };
     let suggestions = if let Presentation::Converted { rich_candidates } = shown {
         get_composed_text(rich_candidates)
     } else if raw.text.is_empty() {
@@ -185,7 +187,7 @@ fn composing_text_response(raw: RawComposingText, edit: CompositionEdit) -> Comp
         vec![Suggestion {
             text: raw.text.clone(),
             subtext: String::new(),
-            corresponding_count: raw.text.chars().count() as i32,
+            corresponding_count: input_count,
             candidate_id: -1,
         }]
     };
@@ -194,6 +196,7 @@ fn composing_text_response(raw: RawComposingText, edit: CompositionEdit) -> Comp
         hiragana: raw.text,
         suggestions,
         is_converted,
+        input_count,
     }
 }
 

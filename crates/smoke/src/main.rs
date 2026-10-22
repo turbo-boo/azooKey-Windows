@@ -16,7 +16,8 @@ use hyper_util::rt::TokioIo;
 use shared::proto::{
     azookey_service_client::AzookeyServiceClient, window_service_client::WindowServiceClient,
     AppendTextRequest, ClearTextRequest, EmptyResponse, MoveCursorRequest, RequestConversionRequest,
-    SetCandidateRequest, SetInputModeRequest, SetSelectionRequest, ShrinkTextRequest,
+    RemoveTextRequest, SetCandidateRequest, SetInputModeRequest, SetSelectionRequest,
+    ShrinkTextRequest,
 };
 use tonic::transport::{Channel, Endpoint};
 use tower::service_fn;
@@ -136,6 +137,30 @@ async fn check_converter(client: &mut AzookeyServiceClient<Channel>, keys: &str)
         single.hiragana == "と" && !single.is_converted && shown == ["と"],
         "typing \"to\" showed {shown:?} (converted: {}), expected [\"と\"]",
         single.is_converted
+    );
+    timed(&mut other, client.clear_text(ClearTextRequest {})).await?;
+
+    // Commit ranges count converter input units, not kana: after "kaki" and
+    // Backspace, "か" still stands for the two inputs "k" and "a".
+    for key in ["k", "a", "k", "i"] {
+        timed(
+            &mut append,
+            client.append_text(AppendTextRequest {
+                text_to_append: key.to_string(),
+            }),
+        )
+        .await?;
+    }
+    let removed = timed(&mut other, client.remove_text(RemoveTextRequest {}))
+        .await?
+        .composing_text
+        .context("RemoveText returned no composing text")?;
+    let counts: Vec<i32> = removed.suggestions.iter().map(|s| s.corresponding_count).collect();
+    ensure!(
+        removed.hiragana == "か" && removed.input_count == 2 && counts == [2],
+        "after kaki + Backspace: {:?}, input_count {}, corresponding counts {counts:?}; expected か, 2, [2]",
+        removed.hiragana,
+        removed.input_count
     );
     timed(&mut other, client.clear_text(ClearTextRequest {})).await?;
 

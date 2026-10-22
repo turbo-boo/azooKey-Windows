@@ -464,6 +464,13 @@ public func free_candidates(
     return _strdup(composingText.convertTarget)!
 }
 
+/// Input units in the composition. Candidates' correspondingCount and
+/// ShrinkText count in these units, not in characters of convertTarget.
+@_silgen_name("GetInputCount")
+@MainActor public func get_input_count() -> Int32 {
+    return Int32(composingText.input.count)
+}
+
 @_silgen_name("SetContext")
 @MainActor public func set_context(
     context: UnsafePointer<CChar>

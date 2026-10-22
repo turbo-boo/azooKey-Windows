@@ -104,7 +104,6 @@ struct RemovedTextView {
     corresponding_count: i32,
     learnable: bool,
     show_candidates: bool,
-    from_candidate: bool,
 }
 
 fn view_after_remove(candidates: &Candidates) -> RemovedTextView {
@@ -115,15 +114,14 @@ fn view_after_remove(candidates: &Candidates) -> RemovedTextView {
             corresponding_count,
             learnable: candidate_is_learnable(candidates, 0),
             show_candidates: candidates.is_converted,
-            from_candidate: true,
         },
+        // the hiragana stands for the whole remaining input
         None => RemovedTextView {
             text: candidates.hiragana.clone(),
             sub_text: String::new(),
-            corresponding_count: 0,
+            corresponding_count: candidates.input_count,
             learnable: false,
             show_candidates: false,
-            from_candidate: false,
         },
     }
 }
@@ -751,6 +749,7 @@ impl TextServiceFactory {
                             corresponding_count: vec![0; predictions.texts.len()],
                             candidate_ids: predictions.prediction_ids,
                             is_converted: true,
+                            input_count: 0,
                         };
                         selection_index = 0;
                         preview.clear();
@@ -808,6 +807,7 @@ impl TextServiceFactory {
                             corresponding_count: vec![0; predictions.texts.len()],
                             candidate_ids: predictions.prediction_ids,
                             is_converted: true,
+                            input_count: 0,
                         };
                         selection_index = 0;
                         ipc_service.set_candidates(candidates.texts.clone())?;
@@ -849,7 +849,9 @@ impl TextServiceFactory {
                         }
                     };
                     if !converted.is_empty() {
-                        let count = raw_hiragana.chars().count() as i32;
+                        // The AI candidate replaces the whole composition, so it
+                        // covers every input unit (not the number of kana).
+                        let count = candidates.input_count;
                         candidates = Candidates {
                             texts: converted.clone(),
                             sub_texts: vec![String::new(); converted.len()],
@@ -857,6 +859,7 @@ impl TextServiceFactory {
                             corresponding_count: vec![count; converted.len()],
                             candidate_ids: vec![],
                             is_converted: true,
+                            input_count: count,
                         };
                         selection_index = 0;
                         corresponding_count = count;
@@ -901,12 +904,12 @@ impl TextServiceFactory {
                     selection_index = 0;
                     let view = view_after_remove(&candidates);
                     corresponding_count = view.corresponding_count;
-                    if view.from_candidate {
-                        raw_input = raw_input
-                            .chars()
-                            .take(corresponding_count as usize)
-                            .collect();
-                    }
+                    // Keep the romaji history aligned with the converter's input
+                    // units: ShrinkText later skips that many of them.
+                    raw_input = raw_input
+                        .chars()
+                        .take(candidates.input_count.max(0) as usize)
+                        .collect();
                     preview = view.text;
                     suffix = view.sub_text;
                     raw_hiragana = hiragana;
@@ -1064,8 +1067,14 @@ impl TextServiceFactory {
                         SetTextType::HalfLatin => to_halfwidth(&raw_input),
                     };
 
+                    // The displayed text now stands for the whole composition;
+                    // keep preview/suffix and the commit range in sync so the
+                    // next key commits exactly what is shown.
+                    preview = text;
+                    suffix.clear();
+                    corresponding_count = candidates.input_count;
                     should_learn_candidate = false;
-                    self.set_text(&text, "")?;
+                    self.set_text(&preview, "")?;
                 }
             }
         }
@@ -1163,6 +1172,7 @@ mod tests {
             corresponding_count: vec![2],
             candidate_ids: vec![-1],
             is_converted: false,
+            input_count: 2,
         };
         assert!(!candidate_is_learnable(&raw, 0));
 
@@ -1178,32 +1188,37 @@ mod tests {
     fn backspace_shows_first_candidate_of_the_fresh_list() {
         // After Backspace the server returns only the unconverted text (as
         // azooKey-Desktop does), even if the 3rd candidate was selected before.
+        // "kyou": 4 input units for 3 kana
         let after_remove = Candidates {
             texts: vec!["きょう".to_string()],
             sub_texts: vec![String::new()],
             hiragana: "きょう".to_string(),
-            corresponding_count: vec![3],
+            corresponding_count: vec![4],
             candidate_ids: vec![-1],
             is_converted: false,
+            input_count: 4,
         };
 
         let view = view_after_remove(&after_remove);
         assert_eq!(view.text, "きょう");
-        assert_eq!(view.corresponding_count, 3);
+        assert_eq!(view.corresponding_count, 4);
         assert!(!view.learnable);
         assert!(!view.show_candidates);
     }
 
     #[test]
     fn backspace_without_candidates_keeps_remaining_hiragana_visible() {
+        // "kyo": 3 input units
         let after_remove = Candidates {
             hiragana: "きょ".to_string(),
+            input_count: 3,
             ..Candidates::default()
         };
 
         let view = view_after_remove(&after_remove);
         assert_eq!(view.text, "きょ");
         assert_eq!(view.sub_text, "");
-        assert!(!view.from_candidate);
+        // committing it later must consume all of the remaining input
+        assert_eq!(view.corresponding_count, 3);
     }
 }

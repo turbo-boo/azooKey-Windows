@@ -45,6 +45,28 @@ pub struct Candidates {
     pub corresponding_count: Vec<i32>,
     pub candidate_ids: Vec<i32>,
     pub is_converted: bool,
+    /// Number of input units (typed keys, or kana after the converter folded
+    /// them) in the whole composition. ShrinkText counts in these units.
+    pub input_count: i32,
+}
+
+impl Candidates {
+    fn from_composing_text(
+        composing_text: Option<shared::proto::ComposingText>,
+    ) -> anyhow::Result<Self> {
+        let composing_text =
+            composing_text.ok_or_else(|| anyhow::anyhow!("composing_text is None"))?;
+        let suggestions = &composing_text.suggestions;
+        Ok(Self {
+            texts: suggestions.iter().map(|s| s.text.clone()).collect(),
+            sub_texts: suggestions.iter().map(|s| s.subtext.clone()).collect(),
+            corresponding_count: suggestions.iter().map(|s| s.corresponding_count).collect(),
+            candidate_ids: suggestions.iter().map(|s| s.candidate_id).collect(),
+            is_converted: composing_text.is_converted,
+            input_count: composing_text.input_count,
+            hiragana: composing_text.hiragana,
+        })
+    }
 }
 
 async fn open_pipe(name: &'static str) -> std::io::Result<TokioIo<NamedPipeClient>> {
@@ -166,37 +188,7 @@ impl IPCService {
             .clone()
             .block_on(self.azookey_client.append_text(request))?;
         let composing_text = response.into_inner().composing_text;
-
-        let candidates = if let Some(composing_text) = composing_text {
-            Candidates {
-                texts: composing_text
-                    .suggestions
-                    .iter()
-                    .map(|s| s.text.clone())
-                    .collect(),
-                sub_texts: composing_text
-                    .suggestions
-                    .iter()
-                    .map(|s| s.subtext.clone())
-                    .collect(),
-                hiragana: composing_text.hiragana,
-                corresponding_count: composing_text
-                    .suggestions
-                    .iter()
-                    .map(|s| s.corresponding_count)
-                    .collect(),
-                candidate_ids: composing_text
-                    .suggestions
-                    .iter()
-                    .map(|s| s.candidate_id)
-                    .collect(),
-                is_converted: composing_text.is_converted,
-            }
-        } else {
-            anyhow::bail!("composing_text is None");
-        };
-
-        Ok(candidates)
+        Candidates::from_composing_text(composing_text)
     }
 
     #[tracing::instrument]
@@ -207,37 +199,7 @@ impl IPCService {
             .clone()
             .block_on(self.azookey_client.remove_text(request))?;
         let composing_text = response.into_inner().composing_text;
-
-        let candidates = if let Some(composing_text) = composing_text {
-            Candidates {
-                texts: composing_text
-                    .suggestions
-                    .iter()
-                    .map(|s| s.text.clone())
-                    .collect(),
-                sub_texts: composing_text
-                    .suggestions
-                    .iter()
-                    .map(|s| s.subtext.clone())
-                    .collect(),
-                hiragana: composing_text.hiragana,
-                corresponding_count: composing_text
-                    .suggestions
-                    .iter()
-                    .map(|s| s.corresponding_count)
-                    .collect(),
-                candidate_ids: composing_text
-                    .suggestions
-                    .iter()
-                    .map(|s| s.candidate_id)
-                    .collect(),
-                is_converted: composing_text.is_converted,
-            }
-        } else {
-            anyhow::bail!("composing_text is None");
-        };
-
-        Ok(candidates)
+        Candidates::from_composing_text(composing_text)
     }
 
     #[tracing::instrument]
@@ -247,27 +209,8 @@ impl IPCService {
             .runtime
             .clone()
             .block_on(self.azookey_client.request_conversion(request))?;
-        let composing_text = response
-            .into_inner()
-            .composing_text
-            .ok_or_else(|| anyhow::anyhow!("composing_text is None"))?;
-
-        Ok(Candidates {
-            texts: composing_text.suggestions.iter().map(|s| s.text.clone()).collect(),
-            sub_texts: composing_text.suggestions.iter().map(|s| s.subtext.clone()).collect(),
-            hiragana: composing_text.hiragana,
-            corresponding_count: composing_text
-                .suggestions
-                .iter()
-                .map(|s| s.corresponding_count)
-                .collect(),
-            candidate_ids: composing_text
-                .suggestions
-                .iter()
-                .map(|s| s.candidate_id)
-                .collect(),
-            is_converted: composing_text.is_converted,
-        })
+        let composing_text = response.into_inner().composing_text;
+        Candidates::from_composing_text(composing_text)
     }
 
     #[tracing::instrument]
@@ -356,37 +299,7 @@ impl IPCService {
             .clone()
             .block_on(self.azookey_client.shrink_text(request))?;
         let composing_text = response.into_inner().composing_text;
-
-        let candidates = if let Some(composing_text) = composing_text {
-            Candidates {
-                texts: composing_text
-                    .suggestions
-                    .iter()
-                    .map(|s| s.text.clone())
-                    .collect(),
-                sub_texts: composing_text
-                    .suggestions
-                    .iter()
-                    .map(|s| s.subtext.clone())
-                    .collect(),
-                hiragana: composing_text.hiragana,
-                corresponding_count: composing_text
-                    .suggestions
-                    .iter()
-                    .map(|s| s.corresponding_count)
-                    .collect(),
-                candidate_ids: composing_text
-                    .suggestions
-                    .iter()
-                    .map(|s| s.candidate_id)
-                    .collect(),
-                is_converted: composing_text.is_converted,
-            }
-        } else {
-            anyhow::bail!("composing_text is None");
-        };
-
-        Ok(candidates)
+        Candidates::from_composing_text(composing_text)
     }
 
     pub fn set_context(&mut self, context: String) -> anyhow::Result<()> {

@@ -14,6 +14,9 @@ message ComposingText {
   string hiragana = 1; // The main text content.
   repeated Suggestion suggestions = 2; // List of suggestions for the text.
   bool is_converted = 3; // Whether suggestions came from the converter.
+  // Input units in the whole composition; corresponding_count and ShrinkText
+  // offsets count in these units.
+  int32 input_count = 4;
 }
 
 // Request message for AppendText.

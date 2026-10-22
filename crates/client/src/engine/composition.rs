@@ -332,9 +332,10 @@ impl TextServiceFactory {
                         CompositionState::Previewing,
                         vec![ClientAction::SetSelection(SetSelectionType::Up)],
                     ),
+                    // azooKey-Desktop: Down enters candidate selection like Space
                     Navigation::Down => (
                         CompositionState::Previewing,
-                        vec![ClientAction::SetSelection(SetSelectionType::Down)],
+                        vec![ClientAction::RequestConversion],
                     ),
                 },
                 UserAction::ToggleInputMode => (
@@ -344,9 +345,12 @@ impl TextServiceFactory {
                         ClientAction::SetIMEMode(InputMode::Latin),
                     ],
                 ),
+                // As in azooKey-Desktop, the first Space/Tab always asks for
+                // conversion: live-converted text was produced without rich
+                // candidates, so the candidate list is generated afresh.
                 UserAction::Space | UserAction::Tab => (
                     CompositionState::Previewing,
-                    vec![conversion_key_action(composition.candidates.is_converted)],
+                    vec![ClientAction::RequestConversion],
                 ),
                 UserAction::Function(key) => match key {
                     Function::Five => (

@@ -62,6 +62,10 @@ jobs:
         if ($exec.Command -ne "PATH_TO_LAUNCHER") { throw "Unexpected task command" }
         if ($exec.WorkingDirectory -ne "PATH_TO_APP") { throw "Unexpected task working directory" }
         if ($null -ne $exec.Arguments) { throw "Legacy script arguments are still present" }
+        # Pipes are per user and session, so every logon needs its own
+        # launcher; IgnoreNew would skip a second user's logon.
+        $policy = $task.SelectSingleNode("//task:Settings/task:MultipleInstancesPolicy", $ns)
+        if ($policy.InnerText -ne "Parallel") { throw "Startup task must start one instance per logon" }
 
         $installer = Get-Content "installer/Installer.iss" -Raw
         if ($installer -match "CreateVbsFile|PATH_TO_VBS|wscript\.exe") {

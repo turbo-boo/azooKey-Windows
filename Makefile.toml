@@ -15,13 +15,27 @@ swift build -c release
 cp .build/release/azookey-server.lib ../
 """
 
+# `cargo make build --debug` selects the dev profile, which cargo builds
+# when no profile flag is given; cargo itself has no --debug flag.
 [tasks.build_x64]
-command = "cargo"
-args = ["build", "${@}"]
+script_runner = "powershell"
+script_extension = "ps1"
+script = """
+$cargoArgs = @($args | Where-Object { $_ -ne "--debug" })
+cargo build @cargoArgs
+exit $LASTEXITCODE
+"""
+args = ["${@}"]
 
 [tasks.build_x86]
-command = "cargo"
-args = ["build", "-p", "azookey-windows", "--target=i686-pc-windows-msvc", "${@}"]
+script_runner = "powershell"
+script_extension = "ps1"
+script = """
+$cargoArgs = @($args | Where-Object { $_ -ne "--debug" })
+cargo build -p azookey-windows --target=i686-pc-windows-msvc @cargoArgs
+exit $LASTEXITCODE
+"""
+args = ["${@}"]
 
 [tasks.build_tauri]
 description = "Build the swift code"

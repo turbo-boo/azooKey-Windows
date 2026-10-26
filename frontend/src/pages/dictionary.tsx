@@ -6,29 +6,14 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-
-type UserDictionaryEntry = {
-    reading: string;
-    word: string;
-};
+import {
+    addDictionaryEntries,
+    loadConfig,
+    removeDictionaryEntry,
+    type UserDictionaryEntry,
+} from "@/lib/config";
 
 const entryKey = (entry: UserDictionaryEntry) => `${entry.reading}\u0000${entry.word}`;
-
-const mergeEntries = (
-    current: UserDictionaryEntry[],
-    imported: UserDictionaryEntry[],
-): UserDictionaryEntry[] => {
-    const seen = new Set(current.map(entryKey));
-    const result = [...current];
-    for (const entry of imported) {
-        const key = entryKey(entry);
-        if (!seen.has(key)) {
-            seen.add(key);
-            result.push(entry);
-        }
-    }
-    return result;
-};
 
 export const Dictionary = () => {
     const [entries, setEntries] = useState<UserDictionaryEntry[]>([]);
@@ -37,7 +22,7 @@ export const Dictionary = () => {
     const [saving, setSaving] = useState(false);
 
     useEffect(() => {
-        invoke<any>("get_config")
+        loadConfig()
             .then((data) => {
                 const loaded = data.dictionary?.entries;
                 if (Array.isArray(loaded)) {
@@ -53,20 +38,25 @@ export const Dictionary = () => {
             .catch(() => toast("ユーザー辞書の読み込みに失敗しました"));
     }, []);
 
-    const persistEntries = async (nextEntries: UserDictionaryEntry[]) => {
+    // The changes are applied to the dictionary as it is in the settings file
+    // now, so entries that another settings window added or removed in the
+    // meantime are kept as they are; the list then shows the saved result.
+    const changeEntries = async <T,>(change: () => Promise<T>) => {
         setSaving(true);
         try {
-            const data = await invoke<any>("get_config");
-            data.dictionary = { entries: nextEntries };
-            await invoke("update_config", { newConfig: data });
-            setEntries(nextEntries);
-            return true;
+            return await change();
         } catch {
             toast("ユーザー辞書の更新に失敗しました");
-            return false;
+            return null;
         } finally {
             setSaving(false);
         }
+    };
+
+    const addEntries = async (added: UserDictionaryEntry[]) => {
+        const result = await changeEntries(() => addDictionaryEntries(added));
+        if (result) setEntries(result.entries);
+        return result;
     };
 
     const addEntry = async (event: FormEvent) => {
@@ -79,22 +69,23 @@ export const Dictionary = () => {
             return;
         }
 
-        const entry = { reading: normalizedReading, word: normalizedWord };
-        if (entries.some((current) => entryKey(current) === entryKey(entry))) {
+        const result = await addEntries([
+            { reading: normalizedReading, word: normalizedWord },
+        ]);
+        if (!result) return;
+        if (result.added === 0) {
             toast("同じ項目がすでに登録されています");
             return;
         }
-
-        if (await persistEntries([...entries, entry])) {
-            setReading("");
-            setWord("");
-            toast("辞書に登録しました");
-        }
+        setReading("");
+        setWord("");
+        toast("辞書に登録しました");
     };
 
-    const removeEntry = async (index: number) => {
-        const nextEntries = entries.filter((_, entryIndex) => entryIndex !== index);
-        if (await persistEntries(nextEntries)) {
+    const removeEntry = async (entry: UserDictionaryEntry) => {
+        const remaining = await changeEntries(() => removeDictionaryEntry(entry));
+        if (remaining) {
+            setEntries(remaining);
             toast("辞書から削除しました");
         }
     };
@@ -114,15 +105,13 @@ export const Dictionary = () => {
                 "import_dictionary_file",
                 { path },
             );
-            const merged = mergeEntries(entries, imported);
-            const added = merged.length - entries.length;
-            if (added === 0) {
+            const result = await addEntries(imported);
+            if (!result) return;
+            if (result.added === 0) {
                 toast("追加できる新しい項目はありませんでした");
                 return;
             }
-            if (await persistEntries(merged)) {
-                toast(`${added}件をインポートしました`);
-            }
+            toast(`${result.added}件をインポートしました`);
         } catch (error) {
             toast("辞書のインポートに失敗しました", {
                 description: String(error),
@@ -217,7 +206,7 @@ export const Dictionary = () => {
                                     type="button"
                                     variant="destructive"
                                     size="icon"
-                                    onClick={() => removeEntry(index)}
+                                    onClick={() => removeEntry(entry)}
                                     disabled={saving}
                                     aria-label={`${entry.word}を削除`}
                                 >

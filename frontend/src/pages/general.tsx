@@ -13,8 +13,18 @@ import { Textarea } from "@/components/ui/textarea";
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
+import { changedFields, loadConfig, updateConfig } from "@/lib/config";
 
 type LearningMode = "inputAndOutput" | "onlyOutput" | "nothing";
+
+const defaultMagic = {
+    enabled: false,
+    endpoint: "https://api.openai.com/v1/chat/completions",
+    model: "gpt-4o-mini",
+    api_key: "",
+    instruction: "自然で読みやすい別表現に変換してください。",
+    timeout_seconds: 10,
+};
 
 export const General = () => {
     const [learningMode, setLearningMode] = useState<LearningMode>("inputAndOutput");
@@ -24,17 +34,19 @@ export const General = () => {
         altBackquoteToggle: true,
     });
     const [predictionEnabled, setPredictionEnabled] = useState(false);
-    const [magic, setMagic] = useState({
-        enabled: false,
-        endpoint: "https://api.openai.com/v1/chat/completions",
-        model: "gpt-4o-mini",
-        api_key: "",
-        instruction: "自然で読みやすい別表現に変換してください。",
-        timeout_seconds: 10,
-    });
+    const [magic, setMagic] = useState(defaultMagic);
+    // The magic conversion settings as last loaded or saved, to save only the
+    // fields edited in this window.
+    const [loadedMagic, setLoadedMagic] = useState(defaultMagic);
+
+    const showMagic = (data: any) => {
+        const loaded = { ...defaultMagic, ...(data.magic_conversion ?? {}) };
+        setMagic(loaded);
+        setLoadedMagic(loaded);
+    };
 
     useEffect(() => {
-        invoke<any>("get_config")
+        loadConfig()
             .then((data) => {
                 const mode = data.learning?.mode;
                 if (
@@ -51,7 +63,7 @@ export const General = () => {
                     altBackquoteToggle: shortcuts.alt_backquote_toggle ?? true,
                 });
                 setPredictionEnabled(data.prediction?.enabled ?? false);
-                setMagic((current) => ({ ...current, ...(data.magic_conversion ?? {}) }));
+                showMagic(data);
             })
             .catch(() => {
                 toast("設定の読み込みに失敗しました");
@@ -60,31 +72,24 @@ export const General = () => {
 
     const updateLearningMode = async (mode: LearningMode) => {
         try {
-            const data = await invoke<any>("get_config");
-            data.learning = { mode };
-            await invoke("update_config", { newConfig: data });
+            await updateConfig({ learning: { mode } });
             setLearningMode(mode);
         } catch {
             toast("学習設定の更新に失敗しました");
         }
     };
 
-    const updateGeneralConfig = async (updater: (config: any) => void) => {
+    const updateGeneralConfig = async (patch: Record<string, unknown>) => {
         try {
-            const data = await invoke<any>("get_config");
-            updater(data);
-            await invoke("update_config", { newConfig: data });
-            return true;
+            return await updateConfig(patch);
         } catch {
             toast("設定の更新に失敗しました");
-            return false;
+            return null;
         }
     };
 
     const updateLiveConversion = async (enabled: boolean) => {
-        if (await updateGeneralConfig((data) => {
-            data.live_conversion = { enabled };
-        })) {
+        if (await updateGeneralConfig({ live_conversion: { enabled } })) {
             setLiveConversionEnabled(enabled);
         }
     };
@@ -93,10 +98,7 @@ export const General = () => {
         key: "ctrl_space_toggle" | "alt_backquote_toggle",
         enabled: boolean,
     ) => {
-        if (await updateGeneralConfig((data) => {
-            data.shortcuts = data.shortcuts ?? {};
-            data.shortcuts[key] = enabled;
-        })) {
+        if (await updateGeneralConfig({ shortcuts: { [key]: enabled } })) {
             if (key === "ctrl_space_toggle") {
                 setShortcutValue((current) => ({ ...current, ctrlSpaceToggle: enabled }));
             } else {
@@ -106,9 +108,7 @@ export const General = () => {
     };
 
     const updatePrediction = async (enabled: boolean) => {
-        if (await updateGeneralConfig((data) => {
-            data.prediction.enabled = enabled;
-        })) {
+        if (await updateGeneralConfig({ prediction: { enabled } })) {
             setPredictionEnabled(enabled);
         }
     };
@@ -118,12 +118,15 @@ export const General = () => {
             toast("APIエンドポイントとモデル名を入力してください");
             return;
         }
-        if (await updateGeneralConfig((data) => {
-            data.magic_conversion = {
-                ...magic,
-                timeout_seconds: Math.min(60, Math.max(1, Number(magic.timeout_seconds) || 10)),
-            };
-        })) {
+        const edited = {
+            ...magic,
+            timeout_seconds: Math.min(60, Math.max(1, Number(magic.timeout_seconds) || 10)),
+        };
+        const data = await updateGeneralConfig({
+            magic_conversion: changedFields(loadedMagic, edited),
+        });
+        if (data) {
+            showMagic(data);
             toast("いい感じ変換の設定を保存しました");
         }
     };

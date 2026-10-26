@@ -1212,7 +1212,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "hyper-util",
- "parking_lot",
  "serde",
  "serde_json",
  "shared",

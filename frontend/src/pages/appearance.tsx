@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FileCode, Image, Palette, Save } from "lucide-react";
 import { toast } from "sonner";
@@ -15,6 +14,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { changedFields, loadConfig, updateConfig } from "@/lib/config";
 
 type ThemeConfig = {
     mode: string;
@@ -45,20 +45,27 @@ const colorValue = (value: string, fallback: string) =>
 
 export const Appearance = () => {
     const [theme, setTheme] = useState<ThemeConfig>(defaults);
+    // The theme as last loaded or saved, to save only the fields edited in
+    // this window.
+    const [loadedTheme, setLoadedTheme] = useState<ThemeConfig>(defaults);
     const [saving, setSaving] = useState(false);
 
+    const showTheme = (data: any) => {
+        const loaded = { ...defaults, ...(data.theme ?? {}) };
+        setTheme(loaded);
+        setLoadedTheme(loaded);
+    };
+
     useEffect(() => {
-        invoke<any>("get_config")
-            .then((data) => setTheme({ ...defaults, ...(data.theme ?? {}) }))
+        loadConfig()
+            .then(showTheme)
             .catch(() => toast("テーマ設定を読み込めませんでした"));
     }, []);
 
     const saveTheme = async () => {
         setSaving(true);
         try {
-            const data = await invoke<any>("get_config");
-            data.theme = theme;
-            await invoke("update_config", { newConfig: data });
+            showTheme(await updateConfig({ theme: changedFields(loadedTheme, theme) }));
             toast("テーマを保存しました");
         } catch {
             toast("テーマの保存に失敗しました");

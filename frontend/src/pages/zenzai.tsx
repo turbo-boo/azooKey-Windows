@@ -14,6 +14,7 @@ import {
 import { useEffect, useState } from "react";
 import { toast } from "sonner"
 import { invoke } from '@tauri-apps/api/core';
+import { loadConfig, updateConfig as saveConfig } from "@/lib/config";
 import {
     Tooltip,
     TooltipContent,
@@ -69,7 +70,7 @@ export const Zenzai = () => {
 
     // Load config on component mount
     useEffect(() => {
-        invoke<any>("get_config")
+        loadConfig()
             .then((data) => {
                 const zenzai = data.zenzai;
                 setValue({
@@ -96,12 +97,9 @@ export const Zenzai = () => {
         })
     }, []);
 
-    const updateConfig = async (updater: (config: any) => void) => {
+    const updateConfig = async (patch: Record<string, unknown>) => {
         try {
-            const data = await invoke<any>("get_config");
-            updater(data);
-            await invoke("update_config", { newConfig: data });
-            return data;
+            return await saveConfig(patch);
         } catch (error) {
             toast("設定の更新に失敗しました");
             return null;
@@ -109,10 +107,8 @@ export const Zenzai = () => {
     };
 
     const handleZenzaiChange = async () => {
-        const data = await updateConfig((data) => {
-            data.zenzai.enable = !value.enable;
-        });
-        
+        const data = await updateConfig({ zenzai: { enable: !value.enable } });
+
         if (data) {
             setValue((prev) => ({ ...prev, enable: data.zenzai.enable }));
         }
@@ -122,9 +118,7 @@ export const Zenzai = () => {
         const newProfile = event.target.value;
         setValue((prev) => ({ ...prev, profile: newProfile }));
         
-        updateConfig((data) => {
-            data.zenzai.profile = newProfile;
-        });
+        updateConfig({ zenzai: { profile: newProfile } });
     };
 
     const chooseTunerDirectory = async () => {
@@ -133,9 +127,7 @@ export const Zenzai = () => {
 
         try {
             await invoke("validate_tuner_model", { path });
-            const data = await updateConfig((data) => {
-                data.personalization.tuner_directory = path;
-            });
+            const data = await updateConfig({ personalization: { tuner_directory: path } });
             if (data) {
                 setPersonalization((prev) => ({ ...prev, tuner_directory: path }));
                 toast("Tunerモデルを確認しました");
@@ -159,25 +151,19 @@ export const Zenzai = () => {
             }
         }
 
-        const data = await updateConfig((data) => {
-            data.personalization.enabled = enabled;
-        });
+        const data = await updateConfig({ personalization: { enabled } });
         if (data) setPersonalization((prev) => ({ ...prev, enabled }));
     };
 
     const setPersonalizationAlpha = async (alpha: number) => {
         const normalized = Math.min(1, Math.max(0, alpha));
         setPersonalization((prev) => ({ ...prev, alpha: normalized }));
-        await updateConfig((data) => {
-            data.personalization.alpha = normalized;
-        });
+        await updateConfig({ personalization: { alpha: normalized } });
     };
 
     const handleBackendChange = async (backend: string) => {
-        const data = await updateConfig((data) => {
-            data.zenzai.backend = backend;
-        });
-        
+        const data = await updateConfig({ zenzai: { backend } });
+
         if (data) {
             setValue((prev) => ({ ...prev, backend }));
             toast("バックエンドが変更されました", {

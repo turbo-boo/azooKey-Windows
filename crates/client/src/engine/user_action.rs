@@ -1,10 +1,15 @@
 use crate::extension::VKeyExt;
-use anyhow::{Context, Result};
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyboardState, ToUnicode, VK_SHIFT};
+use anyhow::Result;
+use windows::Win32::{
+    Foundation::{LPARAM, WPARAM},
+    UI::Input::KeyboardAndMouse::{GetKeyboardState, ToUnicode, VK_SHIFT},
+};
 
 #[derive(Debug)]
 pub enum UserAction {
-    Input(char),
+    // what the key types: usually one character, but a keyboard layout can
+    // produce several, or a character outside the BMP
+    Input(String),
     Backspace,
     Enter,
     Space,
@@ -37,9 +42,75 @@ pub enum Function {
     Ten,
 }
 
-impl TryFrom<usize> for UserAction {
-    type Error = anyhow::Error;
-    fn try_from(key_code: usize) -> Result<UserAction> {
+/// ToUnicode flag (bit 2, Windows 10 1607+): translate without changing the
+/// keyboard state, i.e. without consuming or recording a dead key.
+const TRANSLATE_KEEP_STATE: u32 = 0x4;
+
+/// Enough for any layout: ligatures are at most a few characters, each at
+/// most a surrogate pair.
+const TRANSLATION_BUFFER_LEN: usize = 16;
+
+/// What ToUnicode reported for a key.
+#[derive(Debug, PartialEq)]
+enum Translation {
+    Text(String),
+    /// An accent waiting for the next key (the buffer holds its spacing form).
+    DeadKey,
+    None,
+}
+
+/// Decodes ToUnicode's result: `written` is its return value, `buffer` the
+/// UTF-16 output.
+fn decode_translation(written: i32, buffer: &[u16]) -> Translation {
+    let Ok(len) = usize::try_from(written) else {
+        return Translation::DeadKey;
+    };
+    let Some(units) = buffer.get(..len) else {
+        return Translation::None;
+    };
+    match String::from_utf16(units) {
+        Ok(text) if !text.is_empty() && !text.chars().any(char::is_control) => {
+            Translation::Text(text)
+        }
+        _ => Translation::None,
+    }
+}
+
+fn scan_code(lparam: LPARAM) -> u32 {
+    ((lparam.0 as usize >> 16) & 0xFF) as u32
+}
+
+fn translate(key_code: usize, lparam: LPARAM, flags: u32) -> Result<Translation> {
+    let mut key_state = [0u8; 256];
+    let mut buffer = [0u16; TRANSLATION_BUFFER_LEN];
+    let written = unsafe {
+        GetKeyboardState(&mut key_state)?;
+        ToUnicode(
+            key_code as u32,
+            scan_code(lparam),
+            Some(&key_state),
+            &mut buffer,
+            flags,
+        )
+    };
+    Ok(decode_translation(written, &buffer))
+}
+
+/// Translates a key the text service eats the way the application's
+/// TranslateMessage would have, so a pending dead key is used up and does
+/// not combine with a later key that reaches the application.
+pub fn consume_translation(wparam: WPARAM, lparam: LPARAM) {
+    if let Err(error) = translate(wparam.0, lparam, 0) {
+        tracing::warn!("Failed to translate the eaten key: {error:?}");
+    }
+}
+
+impl UserAction {
+    /// Classifies a key. This runs for OnTestKeyDown and again for OnKeyDown,
+    /// also for keys that then go to the application, so the translation
+    /// must not change the keyboard state; see [`consume_translation`].
+    pub fn from_key(wparam: WPARAM, lparam: LPARAM) -> Result<UserAction> {
+        let key_code = wparam.0;
         let action = match key_code {
             0x08 => UserAction::Backspace, // VK_BACK
             0x09 => UserAction::Tab,       // VK_TAB
@@ -80,28 +151,53 @@ impl TryFrom<usize> for UserAction {
 
             0xF3 | 0xF4 => UserAction::ToggleInputMode, // Zenkaku/Hankaku
 
-            _ => {
-                let key_state = {
-                    let mut key_state = [0u8; 256];
-                    unsafe {
-                        GetKeyboardState(&mut key_state)?;
-                    }
-                    key_state
-                };
-                let unicode = {
-                    let mut unicode = [0u16; 1];
-                    unsafe { ToUnicode(key_code as u32, 0, Some(&key_state), &mut unicode, 0) };
-                    unicode[0]
-                };
-
-                if unicode != 0 {
-                    UserAction::Input(char::from_u32(unicode as u32).context("Invalid char")?)
-                } else {
-                    UserAction::Unknown
-                }
-            }
+            // A dead key is left to the application: the system then
+            // combines it with the next key, which arrives here translated.
+            _ => match translate(key_code, lparam, TRANSLATE_KEEP_STATE)? {
+                Translation::Text(text) => UserAction::Input(text),
+                Translation::DeadKey | Translation::None => UserAction::Unknown,
+            },
         };
 
         Ok(action)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_translation, Translation};
+
+    #[test]
+    fn translation_keeps_every_utf16_unit_written() {
+        let mut buffer = [0u16; 16];
+        let text: Vec<u16> = "'a".encode_utf16().collect();
+        buffer[..text.len()].copy_from_slice(&text);
+        assert_eq!(
+            decode_translation(2, &buffer),
+            Translation::Text("'a".to_string())
+        );
+        // only what the return value covers
+        assert_eq!(
+            decode_translation(1, &buffer),
+            Translation::Text("'".to_string())
+        );
+
+        let emoji: Vec<u16> = "😀".encode_utf16().collect();
+        assert_eq!(
+            decode_translation(2, &emoji),
+            Translation::Text("😀".to_string())
+        );
+    }
+
+    #[test]
+    fn dead_keys_and_unusable_output_are_not_input() {
+        let accent: Vec<u16> = "´".encode_utf16().collect();
+        assert_eq!(decode_translation(-1, &accent), Translation::DeadKey);
+        assert_eq!(decode_translation(0, &[0; 4]), Translation::None);
+        // half of a surrogate pair
+        assert_eq!(decode_translation(1, &[0xD83D]), Translation::None);
+        // control characters such as Ctrl+letter
+        assert_eq!(decode_translation(1, &[0x01]), Translation::None);
+        assert_eq!(decode_translation(4, &[0x61]), Translation::None);
     }
 }

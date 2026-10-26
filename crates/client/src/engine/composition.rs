@@ -15,7 +15,7 @@ use super::{
     ipc_service::{magic_convert_in_background, Candidates},
     state::IMEState,
     text_util::{to_half_katakana, to_katakana},
-    user_action::{Function, Navigation},
+    user_action::{consume_translation, Function, Navigation},
 };
 use shared::AppConfig;
 use windows::Win32::{
@@ -300,7 +300,7 @@ impl TextServiceFactory {
         let action = if ctrl_space || alt_backquote {
             UserAction::ToggleInputMode
         } else {
-            UserAction::try_from(wparam.0)?
+            UserAction::from_key(wparam, lparam)?
         };
 
         let explicit_input_mode = match &action {
@@ -325,11 +325,11 @@ impl TextServiceFactory {
 
         let (transition, actions) = match composition.state {
             CompositionState::None => match action {
-                UserAction::Input(char) if mode == InputMode::Kana => (
+                UserAction::Input(text) if mode == InputMode::Kana => (
                     CompositionState::Composing,
                     vec![
                         ClientAction::StartComposition,
-                        ClientAction::AppendText(char.to_string()),
+                        ClientAction::AppendText(text),
                     ],
                 ),
                 UserAction::Number(number) if mode == InputMode::Kana => (
@@ -351,9 +351,9 @@ impl TextServiceFactory {
                 }
             },
             CompositionState::Composing => match action {
-                UserAction::Input(char) => (
+                UserAction::Input(text) => (
                     CompositionState::Composing,
-                    vec![ClientAction::AppendText(char.to_string())],
+                    vec![ClientAction::AppendText(text)],
                 ),
                 UserAction::Number(number) => (
                     CompositionState::Composing,
@@ -453,11 +453,11 @@ impl TextServiceFactory {
                 }
             },
             CompositionState::Previewing => match action {
-                UserAction::Input(char) => (
+                UserAction::Input(text) => (
                     CompositionState::Composing,
                     vec![
                         ClientAction::CommitCandidate,
-                        ClientAction::ShrinkText(char.to_string()),
+                        ClientAction::ShrinkText(text),
                     ],
                 ),
                 UserAction::Number(number) => (
@@ -556,12 +556,12 @@ impl TextServiceFactory {
                 }
             },
             CompositionState::Selecting => match action {
-                UserAction::Input(char) if mode == InputMode::Kana => (
+                UserAction::Input(text) if mode == InputMode::Kana => (
                     CompositionState::Composing,
                     vec![
                         ClientAction::DismissPredictions,
                         ClientAction::StartComposition,
-                        ClientAction::AppendText(char.to_string()),
+                        ClientAction::AppendText(text),
                     ],
                 ),
                 UserAction::Number(number) if mode == InputMode::Kana => (
@@ -625,6 +625,7 @@ impl TextServiceFactory {
         };
 
         if let Some((actions, transition)) = self.process_key(context, wparam, lparam)? {
+            consume_translation(wparam, lparam);
             self.handle_action(&actions, transition)?;
         } else {
             return Ok(false);

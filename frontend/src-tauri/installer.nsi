@@ -865,9 +865,16 @@ Section Uninstall
     DeleteRegKey /ifempty HKCU "${MANUPRODUCTKEY}"
     DeleteRegKey /ifempty HKCU "${MANUKEY}"
 
+    ; The per-machine uninstaller runs elevated, and RmDir /r recurses into
+    ; junctions (it only checks FILE_ATTRIBUTE_DIRECTORY), which a
+    ; non-elevated process may have planted in the user's profile. Delete
+    ; with the desktop user's own rights instead.
     SetShellVarContext current
-    RmDir /r "$APPDATA\${BUNDLEID}"
-    RmDir /r "$LOCALAPPDATA\${BUNDLEID}"
+    nsis_tauri_utils::RunAsUser "$SYSDIR\cmd.exe" '/c rd /s /q "$APPDATA\${BUNDLEID}" & rd /s /q "$LOCALAPPDATA\${BUNDLEID}"'
+    Pop $R0
+    ${If} $R0 <> 0
+      DetailPrint "Could not delete the app data as the current user"
+    ${EndIf}
   ${EndIf}
 
   !ifmacrodef NSIS_HOOK_POSTUNINSTALL

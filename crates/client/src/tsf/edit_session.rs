@@ -16,7 +16,11 @@ use std::{cell::Cell, mem::ManuallyDrop, rc::Rc, time::Instant};
 
 use anyhow::Result;
 
-use crate::{engine::state::IMEState, extension::StringExt as _, globals::GUID_DISPLAY_ATTRIBUTE};
+use crate::{
+    engine::{client_action::ClientAction, composition::CompositionState, state::IMEState},
+    extension::StringExt as _,
+    globals::GUID_DISPLAY_ATTRIBUTE,
+};
 
 use super::factory::TextServiceFactory;
 
@@ -115,6 +119,26 @@ unsafe fn set_selection(context: &ITfContext, cookie: u32, range: &ITfRange) -> 
 /// the last key event and can already belong to another document.
 fn composition_context(composition: &ITfComposition) -> Result<ITfContext> {
     Ok(unsafe { composition.GetRange()?.GetContext()? })
+}
+
+/// The edit session that ends `composition` in `context`. The text already
+/// in the composition is what gets committed; only the display attribute is
+/// removed, and the caret is put after the committed text.
+fn end_composition_session(
+    composition: ITfComposition,
+    context: ITfContext,
+) -> Rc<dyn Fn(u32) -> Result<()>> {
+    Rc::new(move |cookie| unsafe {
+        let range: ITfRange = composition.GetRange()?;
+        let prop = context.GetProperty(&GUID_PROP_ATTRIBUTE)?;
+        prop.Clear(cookie, &range)?;
+
+        range.Collapse(cookie, TF_ANCHOR_END)?;
+        set_selection(&context, cookie, &range)?;
+
+        composition.EndComposition(cookie)?;
+        Ok(())
+    })
 }
 
 /// What [`TextServiceFactory::run_outside_key_event`] does when the document
@@ -268,41 +292,69 @@ impl TextServiceFactory {
         Ok(())
     }
 
+    /// Ends the TSF composition, committing its text, and forgets it. It is
+    /// forgotten even if the document cannot be edited: the composition
+    /// holds this object as its sink, so keeping it would keep both alive,
+    /// and the engine would go on editing a composition it cannot end.
     #[tracing::instrument]
     pub fn end_composition(&self) -> Result<()> {
         tracing::debug!("end_composition");
-        let (tid, composition, _) = self.session_state()?;
+        let tid = self.borrow()?.tid;
+        let composition = self.take_tip_composition()?;
 
         if let Some(composition) = composition {
+            let context = composition_context(&composition)?;
             edit_session(
                 tid,
-                composition_context(&composition)?,
-                Rc::new({
-                    let context = composition_context(&composition)?;
-
-                    move |cookie| unsafe {
-                        // The text already in the composition is what gets
-                        // committed; only the display attribute is removed.
-                        let range: ITfRange = composition.GetRange()?;
-                        let prop = context.GetProperty(&GUID_PROP_ATTRIBUTE)?;
-                        prop.Clear(cookie, &range)?;
-
-                        // put the caret after the committed text
-                        range.Collapse(cookie, TF_ANCHOR_END)?;
-                        set_selection(&context, cookie, &range)?;
-
-                        composition.EndComposition(cookie)?;
-                        Ok(())
-                    }
-                }),
+                context.clone(),
+                end_composition_session(composition, context),
             )?;
         } else {
             tracing::warn!("Composition is not started");
         }
 
-        self.borrow()?.borrow_mut_composition()?.tip_composition = None;
-
         Ok(())
+    }
+
+    /// Ends the composition when the text service is deactivated, outside
+    /// key handling, where TSF rarely grants a synchronous lock. The TSF
+    /// composition is ended now if the document can be locked, otherwise
+    /// when TSF runs the queued session; the engine, the candidate window
+    /// and the server's text are reset right away either way.
+    pub fn end_composition_on_deactivate(&self) -> Result<()> {
+        let tid = self.borrow()?.tid;
+        let tip_composition = self.take_tip_composition()?;
+        let composing = self.has_active_composition()?;
+
+        let mut result = Ok(());
+        if let Some(composition) = tip_composition {
+            let ended = composition_context(&composition).and_then(|context| {
+                run_edit_session(
+                    tid,
+                    context.clone(),
+                    end_composition_session(composition, context),
+                    TF_ES_ASYNCDONTCARE | TF_ES_READWRITE,
+                )
+            });
+            if let Err(error) = ended {
+                tracing::warn!("Cannot end the composition in the document: {error:?}");
+                result = Err(error);
+            }
+        }
+
+        if composing {
+            // without a TSF composition EndComposition only resets the rest
+            self.handle_action(&[ClientAction::EndComposition], CompositionState::None)?;
+        }
+        result
+    }
+
+    fn take_tip_composition(&self) -> Result<Option<ITfComposition>> {
+        Ok(self
+            .borrow()?
+            .borrow_mut_composition()?
+            .tip_composition
+            .take())
     }
 
     #[tracing::instrument]

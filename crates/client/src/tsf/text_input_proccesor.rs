@@ -136,7 +136,7 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
             }
         };
 
-        check("end composition", self.end_composition());
+        check("end composition", self.end_composition_on_deactivate());
 
         // persist learning memory when the text service is deactivated
         check(

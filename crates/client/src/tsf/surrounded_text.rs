@@ -107,13 +107,14 @@ impl TextServiceFactory {
 
     pub fn update_context(&self, preview: &str) -> Result<()> {
         let result: Result<()> = (|| unsafe {
-            let text_service = self.borrow()?;
-
-            let context = text_service.context::<ITfContext>()?;
+            let (tid, context) = {
+                let text_service = self.borrow()?;
+                (text_service.tid, text_service.context::<ITfContext>()?)
+            };
             let parent_context = self.to_parent_context_if_exists(Some(context))?;
 
             let preceding_text = edit_session::<String>(
-                text_service.tid,
+                tid,
                 parent_context.clone(),
                 Rc::new({
                     // TSF positions count UTF-16 code units

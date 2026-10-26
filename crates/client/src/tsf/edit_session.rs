@@ -212,6 +212,20 @@ impl TextServiceFactory {
         }
     }
 
+    /// The client id, the TSF composition and the display attribute atom.
+    /// No borrow of the text service is kept: the edit sessions using them
+    /// can re-enter it, e.g. through OnCompositionTerminated when the
+    /// application ends the composition in reaction to an edit.
+    fn session_state(&self) -> Result<(u32, Option<ITfComposition>, Option<u32>)> {
+        let text_service = self.borrow()?;
+        let composition = text_service.borrow_composition()?.tip_composition.clone();
+        let display_attribute = text_service
+            .display_attribute_atom
+            .get(&GUID_DISPLAY_ATTRIBUTE)
+            .copied();
+        Ok((text_service.tid, composition, display_attribute))
+    }
+
     #[tracing::instrument]
     pub fn start_composition(&self) -> Result<()> {
         tracing::debug!("start_composition");
@@ -223,14 +237,19 @@ impl TextServiceFactory {
             self.end_composition()?;
         }
 
-        let text_service = self.borrow()?;
-        let context = text_service.context()?;
-        let context_composition = text_service.context::<ITfContextComposition>()?;
-        let sink = text_service.this::<ITfCompositionSink>()?;
-        let insert = text_service.context::<ITfInsertAtSelection>()?;
+        let (tid, context, context_composition, sink, insert) = {
+            let text_service = self.borrow()?;
+            (
+                text_service.tid,
+                text_service.context()?,
+                text_service.context::<ITfContextComposition>()?,
+                text_service.this::<ITfCompositionSink>()?,
+                text_service.context::<ITfInsertAtSelection>()?,
+            )
+        };
 
         let composition = edit_session::<ITfComposition>(
-            text_service.tid,
+            tid,
             context,
             Rc::new({
                 move |cookie| unsafe {
@@ -244,7 +263,7 @@ impl TextServiceFactory {
         )?;
 
         tracing::debug!("Composition started {composition:?}");
-        text_service.borrow_mut_composition()?.tip_composition = Some(composition);
+        self.borrow()?.borrow_mut_composition()?.tip_composition = Some(composition);
 
         Ok(())
     }
@@ -252,11 +271,11 @@ impl TextServiceFactory {
     #[tracing::instrument]
     pub fn end_composition(&self) -> Result<()> {
         tracing::debug!("end_composition");
-        let text_service = self.borrow()?;
+        let (tid, composition, _) = self.session_state()?;
 
-        if let Some(composition) = text_service.borrow_composition()?.tip_composition.clone() {
+        if let Some(composition) = composition {
             edit_session(
-                text_service.tid,
+                tid,
                 composition_context(&composition)?,
                 Rc::new({
                     let context = composition_context(&composition)?;
@@ -281,18 +300,18 @@ impl TextServiceFactory {
             tracing::warn!("Composition is not started");
         }
 
-        text_service.borrow_mut_composition()?.tip_composition = None;
+        self.borrow()?.borrow_mut_composition()?.tip_composition = None;
 
         Ok(())
     }
 
     #[tracing::instrument]
     pub fn set_text(&self, text: &str, subtext: &str) -> Result<()> {
-        let text_service = self.borrow()?;
+        let (tid, composition, display_attribute) = self.session_state()?;
 
-        if let Some(composition) = text_service.borrow_composition()?.tip_composition.clone() {
+        if let Some(composition) = composition {
             edit_session(
-                text_service.tid,
+                tid,
                 composition_context(&composition)?,
                 Rc::new({
                     // TSF positions count UTF-16 code units
@@ -301,7 +320,6 @@ impl TextServiceFactory {
                     // unpadded is all you need!
                     let text = format!("{text}{subtext}").as_str().to_wide_16_unpadded();
                     let context = composition_context(&composition)?;
-                    let display_attribute_atom = text_service.display_attribute_atom.clone();
 
                     move |cookie| unsafe {
                         let range = composition.GetRange()?;
@@ -320,10 +338,8 @@ impl TextServiceFactory {
                                 &mut shifted,
                                 std::ptr::null(),
                             )?;
-                            let display_attribute =
-                                display_attribute_atom.get(&GUID_DISPLAY_ATTRIBUTE);
                             if let Some(display_attribute) = display_attribute {
-                                let pvar = VARIANT::from(*display_attribute as i32);
+                                let pvar = VARIANT::from(display_attribute as i32);
                                 let prop = context.GetProperty(&GUID_PROP_ATTRIBUTE)?;
                                 prop.SetValue(cookie, &text_range, &pvar)?;
                             }
@@ -345,18 +361,17 @@ impl TextServiceFactory {
 
     #[tracing::instrument]
     pub fn shift_start(&self, text: &str, subtext: &str) -> Result<()> {
-        let text_service = self.borrow()?;
+        let (tid, composition, display_attribute) = self.session_state()?;
 
-        if let Some(composition) = text_service.borrow_composition()?.tip_composition.clone() {
+        if let Some(composition) = composition {
             edit_session(
-                text_service.tid,
+                tid,
                 composition_context(&composition)?,
                 Rc::new({
                     // TSF positions count UTF-16 code units
                     let text_len = text.encode_utf16().count() as i32;
                     let subtext = subtext.to_wide_16_unpadded();
                     let context = composition_context(&composition)?;
-                    let display_attribute_atom = text_service.display_attribute_atom.clone();
 
                     move |cookie| unsafe {
                         // first, shift the start of the composition
@@ -377,9 +392,8 @@ impl TextServiceFactory {
 
                         range.SetText(cookie, TF_ST_CORRECTION, &subtext)?;
 
-                        let display_attribute = display_attribute_atom.get(&GUID_DISPLAY_ATTRIBUTE);
                         if let Some(display_attribute) = display_attribute {
-                            let pvar = VARIANT::from(*display_attribute as i32);
+                            let pvar = VARIANT::from(display_attribute as i32);
                             let prop = context.GetProperty(&GUID_PROP_ATTRIBUTE)?;
                             prop.SetValue(cookie, &range, &pvar)?;
                         }

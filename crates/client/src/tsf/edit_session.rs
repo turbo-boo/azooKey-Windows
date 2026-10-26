@@ -611,17 +611,17 @@ impl TextServiceFactory {
         }
 
         let result: Result<()> = (|| {
-            let (tid, context, tip_composition) = {
+            let (tid, tip_composition) = {
                 let text_service = self.borrow()?;
                 let composition = text_service.borrow_composition()?;
-                (
-                    text_service.tid,
-                    text_service.context::<ITfContext>()?,
-                    composition.tip_composition.clone(),
-                )
+                (text_service.tid, composition.tip_composition.clone())
             };
 
             if let Some(tip_composition) = tip_composition {
+                // The range is measured in the composition's own document;
+                // the text service's context follows the last key and can
+                // already be another one, whose lock cookie would not apply.
+                let context = composition_context(&tip_composition)?;
                 // Only moves the candidate window: run now if the document
                 // can be read, otherwise when TSF grants the lock.
                 read_session(

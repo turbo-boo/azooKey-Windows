@@ -49,8 +49,11 @@ fn webview_data_directory() -> std::path::PathBuf {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // obtain uiaccess token
-    prepare_uiaccess_token()?;
+    // Without UIAccess the windows still work for normal applications; they
+    // just cannot be shown above elevated or immersive ones.
+    if let Err(error) = prepare_uiaccess_token() {
+        eprintln!("Running without UIAccess: {error:#}");
+    }
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event()
         .with_any_thread(true)

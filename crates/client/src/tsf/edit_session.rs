@@ -192,22 +192,35 @@ impl TextServiceFactory {
         let requested = composition_context(&composition).and_then(|context| {
             run_edit_session(
                 tid,
-                context,
-                Rc::new(move |_cookie| {
+                context.clone(),
+                Rc::new(move |cookie| {
                     // `this` only keeps the object alive until a queued session
                     // runs; whether the work still applies is checked here.
                     let factory: &TextServiceFactory = unsafe { this.as_impl() };
-                    let current = {
+                    let (active, tracked) = {
                         let text_service = factory.borrow()?;
                         let tip_composition =
                             text_service.borrow_composition()?.tip_composition.clone();
-                        text_service.activation == activation
-                            && tip_composition.as_ref() == Some(&composition)
+                        (
+                            text_service.activation == activation,
+                            tip_composition.as_ref() == Some(&composition),
+                        )
                     };
                     match queued.take() {
-                        Some(work) if current => work(factory),
+                        Some(work) if active && tracked => work(factory),
                         _ => {
                             tracing::debug!("Dropping work for an outdated composition");
+                            if !tracked {
+                                // Let go of in the meantime (deactivated, or
+                                // the document could not be edited): end it
+                                // here, or it stays open with its marking.
+                                // Fails harmlessly if it has already ended.
+                                let session =
+                                    end_composition_session(composition.clone(), context.clone());
+                                if let Err(error) = session(cookie) {
+                                    tracing::debug!("Composition not ended: {error:?}");
+                                }
+                            }
                             Ok(())
                         }
                     }

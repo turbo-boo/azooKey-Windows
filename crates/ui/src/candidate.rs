@@ -1,3 +1,6 @@
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
 use anyhow::{Context as _, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::Serialize;
@@ -14,7 +17,7 @@ use windows::Win32::{
         WS_POPUP,
     },
 };
-use wry::{WebContext, WebViewBuilder};
+use wry::{WebContext, WebView, WebViewBuilder};
 
 use crate::UserEvent;
 
@@ -45,7 +48,116 @@ pub fn create_candidate_window(event_loop: &EventLoop<UserEvent>) -> Result<Wind
     Ok(window)
 }
 
-pub fn theme_payload(theme: &ThemeConfig) -> String {
+/// Background images larger than this are not shown: the image travels as a
+/// base64 data URL through ExecuteScript.
+const MAX_BACKGROUND_IMAGE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Identifies a version of the background image file.
+type ImageStamp = (PathBuf, SystemTime, u64);
+
+/// Tracks the theme the candidate page shows, so that a Show (sent on every
+/// key press during live conversion) only touches the web view when the
+/// theme or the background image file changed, and the image is read and
+/// encoded once per version of the file.
+#[derive(Default)]
+pub struct ThemeState {
+    applied: Option<(ThemeConfig, Option<ImageStamp>)>,
+    image: Option<(ImageStamp, Option<String>)>,
+}
+
+impl ThemeState {
+    /// The argument for `applyTheme` when `theme` differs from the theme
+    /// last returned, `None` when the page already shows it.
+    pub fn payload_if_changed(&mut self, theme: &ThemeConfig) -> Option<String> {
+        let stamp = image_stamp(&theme.background_image);
+        if self
+            .applied
+            .as_ref()
+            .is_some_and(|(applied, applied_stamp)| applied == theme && *applied_stamp == stamp)
+        {
+            return None;
+        }
+        let image = stamp.clone().and_then(|stamp| self.background_image(stamp));
+        self.applied = Some((theme.clone(), stamp));
+        Some(theme_payload(theme, image.as_deref()))
+    }
+
+    /// The page lost or never received the theme (it was (re)loaded, or
+    /// applying failed): the next call returns the payload again.
+    pub fn forget_applied(&mut self) {
+        self.applied = None;
+    }
+
+    /// Sends `theme` to the candidate page unless it already shows it.
+    pub fn apply(&mut self, webview: &WebView, theme: &ThemeConfig) {
+        if let Some(payload) = self.payload_if_changed(theme) {
+            if let Err(error) = webview.evaluate_script(&format!("applyTheme({payload})")) {
+                eprintln!("Failed to apply candidate theme: {error}");
+                self.forget_applied();
+            }
+        }
+    }
+
+    fn background_image(&mut self, stamp: ImageStamp) -> Option<String> {
+        if let Some((cached_stamp, image)) = &self.image {
+            if *cached_stamp == stamp {
+                return image.clone();
+            }
+        }
+        let image = read_background_image(&stamp.0, stamp.2);
+        self.image = Some((stamp, image.clone()));
+        image
+    }
+}
+
+fn image_stamp(path: &str) -> Option<ImageStamp> {
+    if path.is_empty() {
+        return None;
+    }
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((
+        PathBuf::from(path),
+        metadata.modified().ok()?,
+        metadata.len(),
+    ))
+}
+
+/// The image as a data URL, or `None` when its type is not supported, it is
+/// too large or it cannot be read.
+fn read_background_image(path: &Path, len: u64) -> Option<String> {
+    let mime = match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+    {
+        Some(ext) if ext == "png" => "image/png",
+        Some(ext) if ext == "jpg" || ext == "jpeg" => "image/jpeg",
+        Some(ext) if ext == "webp" => "image/webp",
+        _ => return None,
+    };
+    if len > MAX_BACKGROUND_IMAGE_BYTES {
+        eprintln!(
+            "The background image {} is larger than {MAX_BACKGROUND_IMAGE_BYTES} bytes and is not shown",
+            path.display()
+        );
+        return None;
+    }
+    match std::fs::read(path) {
+        Ok(bytes) => Some(format!(
+            "data:{mime};base64,{}",
+            BASE64_STANDARD.encode(bytes)
+        )),
+        Err(error) => {
+            eprintln!(
+                "Cannot read the background image {}: {error}",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+fn theme_payload(theme: &ThemeConfig, background_image: Option<&str>) -> String {
     #[derive(Serialize)]
     struct ThemePayload<'a> {
         mode: &'a str,
@@ -54,26 +166,10 @@ pub fn theme_payload(theme: &ThemeConfig) -> String {
         accent_color: &'a str,
         selection_background: &'a str,
         selection_border: &'a str,
-        background_image: Option<String>,
+        background_image: Option<&'a str>,
         custom_css_enabled: bool,
         custom_css: &'a str,
     }
-
-    let background_image = if theme.background_image.is_empty() {
-        None
-    } else {
-        let path = std::path::Path::new(&theme.background_image);
-        let mime = match path.extension().and_then(|value| value.to_str()).map(str::to_ascii_lowercase) {
-            Some(ext) if ext == "png" => Some("image/png"),
-            Some(ext) if ext == "jpg" || ext == "jpeg" => Some("image/jpeg"),
-            Some(ext) if ext == "webp" => Some("image/webp"),
-            _ => None,
-        };
-        match (mime, std::fs::read(path)) {
-            (Some(mime), Ok(bytes)) => Some(format!("data:{mime};base64,{}", BASE64_STANDARD.encode(bytes))),
-            _ => None,
-        }
-    };
 
     serde_json::to_string(&ThemePayload {
         mode: &theme.mode,
@@ -318,6 +414,8 @@ pub fn create_candidate_webview(web_context: &mut WebContext) -> Result<WebViewB
 
                     window.addEventListener('DOMContentLoaded', () => {
                         if (window.__candidateTheme) applyTheme(window.__candidateTheme);
+                        // A theme sent before the page existed was lost.
+                        window.ipc.postMessage(JSON.stringify({ type: 'ready' }));
                         setTimeout(adjustWindowSize, 50);
                     });
 
@@ -344,11 +442,15 @@ pub fn create_candidate_webview(web_context: &mut WebContext) -> Result<WebViewB
     Ok(webview_builder)
 }
 
-
 #[cfg(test)]
 mod tests {
-    use super::theme_payload;
+    use super::{theme_payload, ThemeState, MAX_BACKGROUND_IMAGE_BYTES};
     use shared::ThemeConfig;
+
+    fn payload(theme: &ThemeConfig) -> serde_json::Value {
+        let payload = ThemeState::default().payload_if_changed(theme).unwrap();
+        serde_json::from_str(&payload).unwrap()
+    }
 
     #[test]
     fn theme_payload_preserves_safe_settings() {
@@ -364,7 +466,7 @@ mod tests {
             custom_css: "main { opacity: 0.9; }".to_string(),
         };
 
-        let value: serde_json::Value = serde_json::from_str(&theme_payload(&theme)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&theme_payload(&theme, None)).unwrap();
         assert_eq!(value["mode"], "dark");
         assert_eq!(value["background_color"], "#101010");
         assert_eq!(value["custom_css_enabled"], true);
@@ -377,26 +479,54 @@ mod tests {
         let mut theme = ThemeConfig::default();
         theme.background_image = "Z:/definitely-missing/background.bmp".to_string();
 
-        let value: serde_json::Value = serde_json::from_str(&theme_payload(&theme)).unwrap();
-        assert!(value["background_image"].is_null());
+        assert!(payload(&theme)["background_image"].is_null());
     }
 
     #[test]
     fn supported_background_image_is_embedded_as_data_url() {
-        let path = std::env::temp_dir().join(format!(
-            "azookey-theme-test-{}.png",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("azookey-theme-test-{}.png", std::process::id()));
         std::fs::write(&path, [0x89, b'P', b'N', b'G']).unwrap();
 
         let mut theme = ThemeConfig::default();
         theme.background_image = path.to_string_lossy().into_owned();
 
-        let value: serde_json::Value = serde_json::from_str(&theme_payload(&theme)).unwrap();
-        assert!(value["background_image"]
+        assert!(payload(&theme)["background_image"]
             .as_str()
             .is_some_and(|value| value.starts_with("data:image/png;base64,")));
 
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn oversized_background_image_is_not_exposed() {
+        let path = std::env::temp_dir().join(format!(
+            "azookey-theme-large-test-{}.png",
+            std::process::id()
+        ));
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_BACKGROUND_IMAGE_BYTES + 1).unwrap();
+        drop(file);
+
+        let mut theme = ThemeConfig::default();
+        theme.background_image = path.to_string_lossy().into_owned();
+
+        assert!(payload(&theme)["background_image"].is_null());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn unchanged_theme_is_sent_once() {
+        let mut state = ThemeState::default();
+        let mut theme = ThemeConfig::default();
+        assert!(state.payload_if_changed(&theme).is_some());
+        assert!(state.payload_if_changed(&theme).is_none());
+
+        theme.mode = "dark".to_string();
+        assert!(state.payload_if_changed(&theme).is_some());
+        assert!(state.payload_if_changed(&theme).is_none());
+
+        state.forget_applied();
+        assert!(state.payload_if_changed(&theme).is_some());
     }
 }

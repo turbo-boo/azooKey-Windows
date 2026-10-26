@@ -110,7 +110,7 @@ pub struct UserDictionaryConfig {
     pub entries: Vec<UserDictionaryEntry>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(default)]
 pub struct ThemeConfig {
     pub mode: String,

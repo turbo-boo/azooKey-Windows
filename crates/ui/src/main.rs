@@ -35,6 +35,8 @@ const INDICATOR_DURATION: Duration = Duration::from_millis(500);
 #[derive(Debug)]
 pub enum UserEvent {
     UpdateHeight(i32),
+    /// The candidate page finished loading.
+    CandidatePageReady,
     WindowAction(WindowAction),
 }
 
@@ -109,14 +111,16 @@ async fn run() -> anyhow::Result<()> {
                                 .send_event(UserEvent::UpdateHeight(height as i32))
                                 .unwrap();
                         }
+                    } else if type_value == "ready" {
+                        proxy_clone
+                            .send_event(UserEvent::CandidatePageReady)
+                            .unwrap();
                     }
                 }
             }
         })
         .build(&candidate_window)?;
-
-    let theme_json = candidate::theme_payload(&AppConfig::read().theme);
-    candidate_webview.evaluate_script(&format!("applyTheme({})", theme_json))?;
+    let mut candidate_theme = candidate::ThemeState::default();
 
     let indicator_window = indicator::create_indicator_window(&event_loop)?;
     let indicator_webview =
@@ -196,15 +200,15 @@ async fn run() -> anyhow::Result<()> {
                     let width = candidate_window.inner_size().width as i32;
                     candidate_window.set_inner_size(LogicalSize::new(width, height));
                 }
+                UserEvent::CandidatePageReady => {
+                    candidate_theme.forget_applied();
+                    candidate_theme.apply(&candidate_webview, &AppConfig::read_cached().theme);
+                }
                 UserEvent::WindowAction(action) => {
                     match action {
                         WindowAction::Show => {
-                            let theme_json = candidate::theme_payload(&AppConfig::read().theme);
-                            if let Err(error) = candidate_webview
-                                .evaluate_script(&format!("applyTheme({})", theme_json))
-                            {
-                                eprintln!("Failed to apply candidate theme: {error}");
-                            }
+                            candidate_theme
+                                .apply(&candidate_webview, &AppConfig::read_cached().theme);
 
                             // if mode indicator is already shown, hide it
                             indicator_hide_at = None;

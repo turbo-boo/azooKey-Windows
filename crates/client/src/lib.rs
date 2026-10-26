@@ -15,7 +15,7 @@ use tsf::factory::TextServiceFactory;
 use windows::{
     core::{IUnknown, Interface as _, GUID, HRESULT},
     Win32::{
-        Foundation::{CLASS_E_CLASSNOTAVAILABLE, E_FAIL, E_UNEXPECTED, HMODULE, S_FALSE, S_OK},
+        Foundation::{CLASS_E_CLASSNOTAVAILABLE, E_NOINTERFACE, E_POINTER, HMODULE, S_FALSE},
         System::{
             Com::IClassFactory,
             Ole::SELFREG_E_CLASS,
@@ -84,32 +84,23 @@ pub unsafe extern "system" fn DllGetClassObject(
     // https://zenn.dev/link/comments/d918e46723da80
     tracing::debug!("DllGetClassObject");
 
-    let result: anyhow::Result<()> = (|| {
-        let rclsid = unsafe { *rclsid };
-        let riid = unsafe { *riid };
-        let ppv = unsafe { &mut *ppv };
+    if ppv.is_null() || rclsid.is_null() || riid.is_null() {
+        return E_POINTER;
+    }
+    // the out pointer must be NULL on every failure
+    *ppv = std::ptr::null_mut();
 
-        if rclsid != GUID_TEXT_SERVICE {
-            return Err(anyhow::anyhow!(CLASS_E_CLASSNOTAVAILABLE));
-        }
+    if *rclsid != GUID_TEXT_SERVICE {
+        return CLASS_E_CLASSNOTAVAILABLE;
+    }
 
-        if riid != IClassFactory::IID {
-            return Err(anyhow::anyhow!(E_UNEXPECTED));
-        }
-
-        *ppv = match riid {
-            IUnknown::IID => std::mem::transmute::<IUnknown, *mut c_void>(IUnknown::from(
-                TextServiceFactory::default(),
-            )),
-            IClassFactory::IID => std::mem::transmute::<IClassFactory, *mut c_void>(
-                IClassFactory::from(TextServiceFactory::default()),
-            ),
-            _ => return Err(anyhow::anyhow!(E_UNEXPECTED)),
-        };
-        Ok(())
-    })();
-
-    check_err!(result)
+    // The class object is only handed out as IClassFactory or IUnknown,
+    // even though the type also implements the text service interfaces.
+    if *riid != IClassFactory::IID && *riid != IUnknown::IID {
+        return E_NOINTERFACE;
+    }
+    let factory: IClassFactory = TextServiceFactory::default().into();
+    factory.query(riid, ppv)
 }
 
 #[no_mangle]

@@ -20,15 +20,6 @@ macro_rules! check_win32_err {
 #[macro_export]
 macro_rules! check_err {
     // macros to convert error from anyhow to HRESULT
-    ($result:ident) => {
-        if $result.is_ok() {
-            windows::Win32::Foundation::S_OK
-        } else {
-            tracing::error!("{:?}", $result.err());
-            windows::Win32::Foundation::S_FALSE
-        }
-    };
-
     ($result:ident, $error:ident) => {
         if $result.is_ok() {
             windows::Win32::Foundation::S_OK

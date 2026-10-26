@@ -1,6 +1,9 @@
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
-use super::{input_mode::InputMode, ipc_service::IPCService};
+use super::{
+    input_mode::InputMode,
+    ipc_service::{converter_availability, Availability, IPCService},
+};
 
 #[derive(Debug)]
 pub struct IMEState {
@@ -28,21 +31,32 @@ impl IMEState {
 
     /// Returns the server connection, connecting first if the server was not
     /// reachable when the text service was activated (e.g. right after logon).
+    ///
+    /// Fails while the converter is paused after a missed deadline, so keys
+    /// go to the application as when no server runs; once the pause is over
+    /// one caller probes it first.
     pub fn ipc_service() -> anyhow::Result<IPCService> {
-        if let Some(ipc_service) = &Self::get()?.ipc_service {
-            return Ok(ipc_service.clone());
+        let stored = Self::get()?.ipc_service.clone();
+        let probe = match converter_availability() {
+            Availability::Available => false,
+            Availability::ProbeDue => true,
+            Availability::Paused => anyhow::bail!("the server is not answering; trying later"),
+        };
+
+        if let Some(mut ipc_service) = stored {
+            if probe {
+                ipc_service.probe()?;
+            }
+            return Ok(ipc_service);
         }
 
         // Connect without holding the lock: IMEState::get only tries to lock,
         // so other threads' keys and the language bar icon would fail while
         // this waits for the server.
         let mut ipc_service = IPCService::new()?;
-        ipc_service.append_text("".to_string())?;
+        ipc_service.probe()?;
 
         // another thread may have connected meanwhile; keep one connection
-        Ok(Self::get()?
-            .ipc_service
-            .get_or_insert(ipc_service)
-            .clone())
+        Ok(Self::get()?.ipc_service.get_or_insert(ipc_service).clone())
     }
 }

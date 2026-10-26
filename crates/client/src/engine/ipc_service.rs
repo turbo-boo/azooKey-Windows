@@ -3,7 +3,11 @@ use hyper_util::rt::TokioIo;
 use shared::proto::{
     azookey_service_client::AzookeyServiceClient, window_service_client::WindowServiceClient,
 };
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    sync::{Arc, Mutex, PoisonError},
+    time::{Duration, Instant},
+};
 use tokio::{net::windows::named_pipe::NamedPipeClient, sync::mpsc, time};
 use tonic::transport::{Channel, Endpoint};
 use tower::service_fn;
@@ -31,6 +35,72 @@ const WINDOW_RPC_TIMEOUT: Duration = Duration::from_secs(2);
 /// at most 60 seconds (magic_conversion.timeout_seconds is clamped to 1..=60).
 const MAGIC_RPC_TIMEOUT: Duration = Duration::from_secs(70);
 
+/// After a converter call missed its deadline the server is taken to be hung
+/// and is left alone for this long: keys go to the application as when no
+/// server runs, instead of each stalling the UI thread for a deadline. Then a
+/// single probe within PROBE_TIMEOUT decides whether it answers again. A
+/// still hung server so costs one PROBE_TIMEOUT stall per 10 seconds of
+/// typing, and a recovered one is used again at most 10 seconds later.
+const PAUSE_AFTER_MISSED_DEADLINE: Duration = Duration::from_secs(10);
+
+/// ClearText does no conversion work; a server that cannot answer it within
+/// a second is not usable for typing.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Whether the converter may be called.
+#[derive(Debug, PartialEq)]
+pub enum Availability {
+    Available,
+    /// It missed a deadline recently.
+    Paused,
+    /// The pause is over and this caller probes it; others wait for the
+    /// outcome as if still paused.
+    ProbeDue,
+}
+
+#[derive(Debug)]
+struct Pause {
+    until: Option<Instant>,
+}
+
+impl Pause {
+    fn check(&mut self, now: Instant) -> Availability {
+        match self.until {
+            None => Availability::Available,
+            Some(until) if now < until => Availability::Paused,
+            Some(_) => {
+                // a probe that misses its deadline pauses again anyway
+                self.until = Some(now + PAUSE_AFTER_MISSED_DEADLINE);
+                Availability::ProbeDue
+            }
+        }
+    }
+
+    fn start(&mut self, now: Instant) {
+        self.until = Some(now + PAUSE_AFTER_MISSED_DEADLINE);
+    }
+
+    fn end(&mut self) {
+        self.until = None;
+    }
+
+    fn is_active(&self, now: Instant) -> bool {
+        self.until.is_some_and(|until| now < until)
+    }
+}
+
+// process-wide: every thread's text service talks to the same server
+static PAUSE: Mutex<Pause> = Mutex::new(Pause { until: None });
+
+fn with_pause<T>(f: impl FnOnce(&mut Pause) -> T) -> T {
+    f(&mut PAUSE.lock().unwrap_or_else(PoisonError::into_inner))
+}
+
+/// Whether the converter may be called now; see [`Availability`].
+pub fn converter_availability() -> Availability {
+    with_pause(|pause| pause.check(Instant::now()))
+}
+
 // connect to kkc server
 #[derive(Debug, Clone)]
 pub struct IPCService {
@@ -41,10 +111,6 @@ pub struct IPCService {
     // current-thread runtime: block_on drives the pipe I/O on the calling
     // thread instead of waiting for a wakeup from a worker thread
     runtime: Arc<tokio::runtime::Runtime>,
-    // set once a call on this handle missed its deadline: the server is not
-    // answering, so later calls fail at once instead of stalling the UI
-    // thread again. Each key gets a fresh handle from IMEState.
-    unresponsive: bool,
 }
 
 #[derive(Debug)]
@@ -252,16 +318,41 @@ impl IPCService {
             azookey_client,
             window_commands: spawn_window_dispatcher()?,
             runtime: Arc::new(runtime),
-            unresponsive: false,
         })
     }
 
-    /// Fails at once when an earlier call on this handle missed its deadline.
+    /// Fails at once while the converter is paused after a missed deadline,
+    /// so a hung server stalls the UI thread at most once per pause.
     fn ensure_responsive(&self) -> Result<()> {
-        if self.unresponsive {
-            anyhow::bail!("server did not answer the previous call");
+        if with_pause(|pause| pause.is_active(Instant::now())) {
+            anyhow::bail!("server did not answer a recent call");
         }
         Ok(())
+    }
+
+    /// Checks within PROBE_TIMEOUT that the converter answers, ending or
+    /// renewing the pause. ClearText also claims the converter for this
+    /// connection; compositions elsewhere replay their input when they see
+    /// the new composition id.
+    pub fn probe(&mut self) -> Result<()> {
+        let request = tonic::Request::new(shared::proto::ClearTextRequest {});
+        let runtime = self.runtime.clone();
+        let result = runtime.block_on(time::timeout(
+            PROBE_TIMEOUT,
+            self.azookey_client.clear_text(request),
+        ));
+        match result {
+            Ok(response) => {
+                // an error reply still comes from a server that answers
+                with_pause(Pause::end);
+                response?;
+                Ok(())
+            }
+            Err(_) => {
+                with_pause(|pause| pause.start(Instant::now()));
+                anyhow::bail!("server did not answer the probe within {PROBE_TIMEOUT:?}")
+            }
+        }
     }
 
     fn finish<T>(
@@ -271,7 +362,7 @@ impl IPCService {
         match result {
             Ok(response) => Ok(response?.into_inner()),
             Err(_) => {
-                self.unresponsive = true;
+                with_pause(|pause| pause.start(Instant::now()));
                 anyhow::bail!("server did not answer within {CONVERTER_RPC_TIMEOUT:?}")
             }
         }
@@ -429,5 +520,35 @@ impl IPCService {
 
     pub fn set_input_mode(&mut self, mode: &str) -> anyhow::Result<()> {
         self.send_window_command(WindowCommand::SetInputMode(mode.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Availability, Pause, PAUSE_AFTER_MISSED_DEADLINE};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_missed_deadline_pauses_the_converter_until_one_probe() {
+        let now = Instant::now();
+        let mut pause = Pause { until: None };
+        assert_eq!(pause.check(now), Availability::Available);
+
+        pause.start(now);
+        assert!(pause.is_active(now));
+        assert_eq!(
+            pause.check(now + Duration::from_secs(1)),
+            Availability::Paused
+        );
+
+        // one caller probes after the pause; the others still see it paused
+        let later = now + PAUSE_AFTER_MISSED_DEADLINE;
+        assert_eq!(pause.check(later), Availability::ProbeDue);
+        assert_eq!(pause.check(later), Availability::Paused);
+
+        // the probe answered
+        pause.end();
+        assert!(!pause.is_active(later));
+        assert_eq!(pause.check(later), Availability::Available);
     }
 }

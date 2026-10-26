@@ -391,10 +391,13 @@ impl TextServiceFactory {
             return Ok(None);
         };
 
-        // Without the server nothing can be converted; let the key reach the app.
+        // Without the server nothing can be converted; let the key reach the
+        // app. An active composition is committed first (handle_key), so a
+        // key needs OnKeyDown then.
         if let Err(error) = IMEState::ipc_service() {
             tracing::debug!("Passing key through, IPC service unavailable: {error:?}");
-            return Ok(None);
+            let commit = self.has_active_composition()?;
+            return Ok(commit.then(|| (vec![ClientAction::EndComposition], CompositionState::None)));
         }
 
         let ctrl_pressed = is_ctrl_pressed();
@@ -762,6 +765,16 @@ impl TextServiceFactory {
             return Ok(false);
         };
 
+        // As in process_key: commit what the composition shows, then let the
+        // key reach the application.
+        if let Err(error) = IMEState::ipc_service() {
+            tracing::debug!("Passing key through, IPC service unavailable: {error:?}");
+            if self.has_active_composition()? {
+                self.end_composition_without_converter(false)?;
+            }
+            return Ok(false);
+        }
+
         if let Some((actions, transition)) = self.process_key(context, wparam, lparam)? {
             consume_translation(wparam, lparam);
             self.handle_action(&actions, transition)?;
@@ -802,6 +815,20 @@ impl TextServiceFactory {
         }
         if let Err(error) = self.end_composition() {
             tracing::warn!("Cannot end the composition in the other document: {error:?}");
+        }
+        self.forget_composition()
+    }
+
+    /// Ends the composition while the converter is unavailable: commits what
+    /// it shows, or removes it first if `remove`, and resets the engine.
+    fn end_composition_without_converter(&self, remove: bool) -> Result<()> {
+        if remove {
+            if let Err(error) = self.set_text("", "") {
+                tracing::warn!("Cannot remove the composition's text: {error:?}");
+            }
+        }
+        if let Err(error) = self.end_composition() {
+            tracing::warn!("Cannot end the composition: {error:?}");
         }
         self.forget_composition()
     }
@@ -915,7 +942,19 @@ impl TextServiceFactory {
         let mut should_learn_candidate = composition.should_learn_candidate;
         let mut selection_index = composition.selection_index;
         let mut magic_request = pending_magic_request(&composition.magic_request, actions);
-        let mut ipc_service = IMEState::ipc_service()?;
+        let mut ipc_service = match IMEState::ipc_service() {
+            Ok(ipc_service) => ipc_service,
+            Err(error) => {
+                // The composition cannot go on without the converter (e.g. it
+                // is paused after a missed deadline): end it the way these
+                // actions would, rather than keep one nobody can edit.
+                if composition.state != CompositionState::None {
+                    let remove = actions.contains(&ClientAction::CancelComposition);
+                    self.end_composition_without_converter(remove)?;
+                }
+                return Err(error);
+            }
+        };
         let mut transition = transition;
 
         let applied = (|| -> Result<()> {

@@ -154,24 +154,40 @@ begin
     SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
 end;
 
+function SetEnvironmentVariable(lpName, lpValue: String): Integer;
+  external 'SetEnvironmentVariableW@kernel32.dll stdcall';
+
 // Runs a dependency installer (CodeDependencies.iss) with Setup's
 // administrator rights. Setup downloads or extracts it into {tmp}, which lies
 // in the user's TEMP directory and is writable without elevation, so the file
-// could be replaced before it is started. Copy it into {app} (Program Files,
-// writable only by administrators; checked by Azookey_CheckAppDir), check the
-// copy there and run that.
+// could be replaced before it is started. Copy it into a directory under {app}
+// (Program Files; checked by Azookey_CheckAppDir) that only administrators
+// and SYSTEM can access, check the copy there and run that. Not readable by
+// users either: the file in {tmp} may have been replaced by a hard link to a
+// file they must not read, whose copy would otherwise be readable until the
+// check rejects it.
 function Azookey_ExecuteDependency(const Filename, Parameters: String; var ResultCode: Integer): Boolean;
 var
-  AppDir: String;
+  Staging: String;
   Staged: String;
+  AclResult: Integer;
+  OldTmp: String;
+  OldTemp: String;
 begin
   Result := False;
   ResultCode := -1;
-  AppDir := RemoveBackslashUnlessRoot(ExpandConstant('{app}'));
-  Staged := AppDir + '\' + ExtractFileName(Filename);
-  if not ForceDirectories(AppDir) then
+  Staging := RemoveBackslashUnlessRoot(ExpandConstant('{app}')) + '\setup-staging';
+  Staged := Staging + '\' + ExtractFileName(Filename);
+  if not ForceDirectories(Staging) then
   begin
-    Log(Format('Failed to create %s', [AppDir]));
+    Log(Format('Failed to create %s', [Staging]));
+    Exit;
+  end;
+  if not Exec(ExpandConstant('{sys}\icacls.exe'),
+    '"' + Staging + '" /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F', '',
+    SW_HIDE, ewWaitUntilTerminated, AclResult) or (AclResult <> 0) then
+  begin
+    Log(Format('Failed to restrict access to %s', [Staging]));
     Exit;
   end;
   // A copy left behind by an interrupted setup.
@@ -181,13 +197,25 @@ begin
     Log(Format('Failed to copy %s to %s', [Filename, Staged]));
     Exit;
   end;
+  OldTmp := GetEnv('TMP');
+  OldTemp := GetEnv('TEMP');
   try
     if Azookey_IsTrustedDependency(Staged) then
-      Result := Exec(Staged, Parameters, '', SW_SHOWNORMAL, ewWaitUntilTerminated, ResultCode)
+    begin
+      // The installers unpack and load their own helpers (NSIS plugins, the
+      // WebView2 runtime download) in TEMP; keep those out of the user's
+      // reach as well.
+      SetEnvironmentVariable('TMP', Staging);
+      SetEnvironmentVariable('TEMP', Staging);
+      Result := Exec(Staged, Parameters, '', SW_SHOWNORMAL, ewWaitUntilTerminated, ResultCode);
+    end
     else
       Log(Format('%s is not the expected file; not running it', [Filename]));
   finally
+    SetEnvironmentVariable('TMP', OldTmp);
+    SetEnvironmentVariable('TEMP', OldTemp);
     DeleteFile(Staged);
+    RemoveDir(Staging);
   end;
 end;
 

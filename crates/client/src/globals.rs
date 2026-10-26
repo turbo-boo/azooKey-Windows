@@ -1,6 +1,5 @@
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    mpsc::Sender,
     Arc, Mutex, MutexGuard, OnceLock,
 };
 
@@ -61,7 +60,6 @@ unsafe impl Send for DllModule {}
 pub struct DllModule {
     pub ref_count: Arc<AtomicUsize>,
     pub hinst: Option<HMODULE>,
-    pub sender: Option<Sender<bool>>,
 }
 
 impl DllModule {
@@ -69,7 +67,6 @@ impl DllModule {
         Self {
             ref_count: Arc::new(AtomicUsize::new(0)),
             hinst: None,
-            sender: None,
         }
     }
 

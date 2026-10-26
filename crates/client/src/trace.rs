@@ -1,4 +1,5 @@
 use std::fmt::Write as _;
+use std::{fs::File, path::PathBuf};
 use tracing::field::{Field, Visit};
 use tracing_core::LevelFilter;
 use tracing_subscriber::filter::Targets;
@@ -6,10 +7,16 @@ use tracing_subscriber::{layer::SubscriberExt as _, util::SubscriberInitExt};
 use windows::{core::PCWSTR, Win32::System::Diagnostics::Debug::OutputDebugStringW};
 
 use crate::extension::StringExt as _;
-use crate::globals::DllModule;
 use crate::tracing_chrome::{ChromeLayerBuilder, EventOrSpan};
 
-const LOG_FOLDER: &str = "D:/azookey-windows/logs";
+/// `%LOCALAPPDATA%\Azookey\logs`: per user and writable without elevation.
+fn log_folder() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Azookey")
+        .join("logs")
+}
 
 pub struct StringVisitor<'a> {
     string: &'a mut String,
@@ -29,19 +36,22 @@ pub fn setup_logger() -> anyhow::Result<()> {
     {
         return Ok(());
     }
-    let timestamp = chrono::Local::now().format("%Y-%m-%d-%H.%M.%S");
-    let path = format!("{}/{}.json", LOG_FOLDER, timestamp);
+    // Every process loading the text service writes its own trace; the
+    // process id keeps two started in the same millisecond apart.
+    let folder = log_folder();
+    let timestamp = chrono::Local::now().format("%Y-%m-%d-%H.%M.%S%.3f");
+    let path = folder.join(format!("{timestamp}-{}.json", std::process::id()));
 
-    let writer = {
-        if let Ok(file) = std::fs::File::create(&path) {
-            file
-        } else {
-            return Ok(());
-        }
+    // Logging is optional: without a writable folder there is no trace
+    // (e.g. in sandboxed processes).
+    let writer = match std::fs::create_dir_all(&folder)
+        .and_then(|_| File::options().write(true).create_new(true).open(&path))
+    {
+        Ok(file) => file,
+        Err(_) => return Ok(()),
     };
 
     let builder = ChromeLayerBuilder::new()
-        .file(writer)
         .include_locations(true)
         .include_args(true)
         .name_fn(Box::new(|event_or_span| match event_or_span {
@@ -72,9 +82,7 @@ pub fn setup_logger() -> anyhow::Result<()> {
             EventOrSpan::Span(span) => span.metadata().name().to_string(),
         }));
 
-    let (chrome_layer, sender) = builder.build();
-
-    DllModule::get()?.sender = Some(sender);
+    let chrome_layer = builder.build(writer);
 
     // ignore traces from other crates
     let filter = Targets::new()

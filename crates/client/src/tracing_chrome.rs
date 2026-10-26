@@ -13,19 +13,13 @@ use serde_json::Value as JsonValue;
 use std::{
     fmt::Write as _,
     fs::File,
-    io::{Seek, Write},
+    io::Write,
     marker::PhantomData,
-    sync::{mpsc::Sender, Arc, Mutex},
+    sync::{Arc, Mutex, PoisonError},
 };
 
 type NameFn<S> = Box<dyn Fn(&EventOrSpan<'_, '_, S>) -> String + Send + Sync>;
 type Object = serde_json::Map<String, JsonValue>;
-
-#[derive(Serialize)]
-struct ChromeTrace {
-    #[serde(skip)]
-    entries: Mutex<Vec<TraceEntry>>,
-}
 
 #[derive(Serialize)]
 struct TraceEntry {
@@ -48,27 +42,22 @@ struct TraceEntry {
     line: Option<u32>,
 }
 
-impl ChromeTrace {
-    fn new() -> Self {
-        ChromeTrace {
-            entries: Mutex::new(Vec::new()),
-        }
-    }
+/// Appends entries to the trace file as they come, in the JSON Array
+/// Format of the Trace Event Format. Its closing `]` is optional, so the
+/// file is a valid trace at every point, even if the process is killed.
+struct TraceWriter {
+    file: File,
+    started: bool,
+}
 
-    fn add_entry(&self, entry: TraceEntry) {
-        let mut entries = self.entries.lock().unwrap();
-        entries.push(entry);
-    }
-
-    fn write_entries(&self, writer: &mut File) -> std::io::Result<()> {
-        let entries = self.entries.lock().unwrap();
-        // clear file
-        writer.set_len(0)?;
-        writer.seek(std::io::SeekFrom::Start(0))?;
-
-        let json = serde_json::to_string_pretty(&*entries)?;
-        writer.write_all(json.as_bytes())?;
-
+impl TraceWriter {
+    fn append(&mut self, entry: &TraceEntry) -> anyhow::Result<()> {
+        let separator = if self.started { ",\n" } else { "[\n" };
+        let mut line = serde_json::to_string(entry)?;
+        line.insert_str(0, separator);
+        // one write per entry keeps entries whole when several threads log
+        self.file.write_all(line.as_bytes())?;
+        self.started = true;
         Ok(())
     }
 }
@@ -77,8 +66,7 @@ pub struct ChromeLayer<S>
 where
     S: Subscriber + for<'span> LookupSpan<'span>,
 {
-    writer: Mutex<File>,
-    trace: ChromeTrace,
+    writer: Mutex<TraceWriter>,
     start: std::time::Instant,
     include_args: bool,
     include_locations: bool,
@@ -92,7 +80,6 @@ pub struct ChromeLayerBuilder<S>
 where
     S: Subscriber + for<'span> LookupSpan<'span>,
 {
-    out_writer: Option<File>,
     name_fn: Option<NameFn<S>>,
     cat_fn: Option<NameFn<S>>,
     include_args: bool,
@@ -106,7 +93,6 @@ where
 {
     pub fn new() -> Self {
         ChromeLayerBuilder {
-            out_writer: None,
             name_fn: None,
             cat_fn: None,
             include_args: false,
@@ -114,34 +100,6 @@ where
             _inner: PhantomData,
         }
     }
-
-    /// Set the file to which to output the trace.
-    ///
-    /// Defaults to `./trace-{unix epoch in micros}.json`.
-    ///
-    /// # Panics
-    ///
-    /// If `file` could not be opened/created. To handle errors,
-    /// open a file and pass it to [`writer`](crate::ChromeLayerBuilder::writer) instead.
-    pub fn file(mut self, file: File) -> Self {
-        self.out_writer = Some(file);
-        self
-    }
-
-    /// Supply an arbitrary writer to which to write trace contents.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// # use tracing_chrome::ChromeLayerBuilder;
-    /// # use tracing_subscriber::prelude::*;
-    /// let (layer, guard) = ChromeLayerBuilder::new().writer(std::io::sink()).build();
-    /// # tracing_subscriber::registry().with(layer).init();
-    /// ```
-    // pub fn writer<W: Write + Send + 'static>(mut self, writer: W) -> Self {
-    //     self.out_writer = Some();
-    //     self
-    // }
 
     /// Include arguments in each trace entry.
     ///
@@ -170,36 +128,20 @@ where
         self
     }
 
-    pub fn build(self) -> (ChromeLayer<S>, Sender<bool>) {
-        let writer = self.out_writer.unwrap();
-        let writer_rc = Mutex::new(Arc::new(writer.try_clone().unwrap()));
-
-        let (sender, receiver) = std::sync::mpsc::channel();
-
-        std::thread::spawn(move || {
-            while let Ok(_) = receiver.recv() {
-                let writer = writer_rc.lock().unwrap();
-                let trace = ChromeTrace::new();
-                trace
-                    .write_entries(&mut writer.try_clone().unwrap())
-                    .unwrap();
-
-                break;
-            }
-        });
-
-        let layer = ChromeLayer {
-            writer: Mutex::new(writer),
-            trace: ChromeTrace::new(),
+    /// Builds the layer writing the trace to `file`, which should be empty.
+    pub fn build(self, file: File) -> ChromeLayer<S> {
+        ChromeLayer {
+            writer: Mutex::new(TraceWriter {
+                file,
+                started: false,
+            }),
             start: std::time::Instant::now(),
             name_fn: self.name_fn,
             cat_fn: self.cat_fn,
             include_args: self.include_args,
             include_locations: self.include_locations,
             _inner: PhantomData,
-        };
-
-        (layer, sender)
+        }
     }
 }
 
@@ -269,10 +211,10 @@ where
             line,
         };
 
-        self.trace.add_entry(entry);
-
-        let mut writer = self.writer.lock().unwrap();
-        self.trace.write_entries(&mut *writer)?;
+        self.writer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .append(&entry)?;
 
         Ok(())
     }
@@ -316,10 +258,10 @@ where
                 .flatten(),
         };
 
-        self.trace.add_entry(entry);
-
-        let mut writer = self.writer.lock().unwrap();
-        self.trace.write_entries(&mut *writer)?;
+        self.writer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .append(&entry)?;
 
         Ok(())
     }

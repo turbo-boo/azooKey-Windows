@@ -1,5 +1,5 @@
 use std::cmp::max;
-use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use azookey_server::TonicNamedPipeServer;
@@ -11,8 +11,7 @@ use tao::{
     event::{Event, StartCause, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder},
 };
-use tokio::sync::{mpsc, Mutex};
-use tokio::task::JoinHandle;
+use tokio::sync::mpsc;
 use tonic::transport::Server;
 use uiaccess::run_with_uiaccess;
 use utils::get_candidate_window_position;
@@ -29,6 +28,9 @@ pub mod indicator;
 pub mod ipc;
 pub mod uiaccess;
 pub mod utils;
+
+/// How long the mode indicator stays after the input mode changes.
+const INDICATOR_DURATION: Duration = Duration::from_millis(500);
 
 #[derive(Debug)]
 pub enum UserEvent {
@@ -87,7 +89,6 @@ async fn run() -> anyhow::Result<()> {
     });
 
     let event_loop_proxy = event_loop.create_proxy();
-    let task_guard: Arc<Mutex<Option<JoinHandle<()>>>> = Arc::new(Mutex::new(None));
 
     // WebView2 defaults its user data folder to "<exe>.WebView2" next to the
     // executable, which is not writable under Program Files.
@@ -176,9 +177,12 @@ async fn run() -> anyhow::Result<()> {
         }
     });
 
-    event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Wait;
+    // The indicator is shown for a moment after the input mode changes. All
+    // ShowWindow calls happen on this thread, so a hide cannot overtake a
+    // show that is still pending.
+    let mut indicator_hide_at: Option<Instant> = None;
 
+    event_loop.run(move |event, _, control_flow| {
         let indicator_hwnd = indicator_window.hwnd();
 
         match event {
@@ -203,24 +207,10 @@ async fn run() -> anyhow::Result<()> {
                             }
 
                             // if mode indicator is already shown, hide it
-                            let mut task_guard = match task_guard.try_lock() {
-                                Ok(guard) => guard,
-                                Err(_) => {
-                                    eprintln!(
-                                        "Warning: Failed to lock task_guard, skipping cleanup"
-                                    );
-                                    return;
-                                }
+                            indicator_hide_at = None;
+                            let _ = unsafe {
+                                ShowWindow(HWND(indicator_hwnd as *mut std::ffi::c_void), SW_HIDE)
                             };
-                            if let Some(task) = task_guard.take() {
-                                task.abort();
-                                let _ = unsafe {
-                                    ShowWindow(
-                                        HWND(indicator_hwnd as *mut std::ffi::c_void),
-                                        SW_HIDE,
-                                    )
-                                };
-                            }
 
                             let _ = unsafe {
                                 ShowWindow(
@@ -312,34 +302,30 @@ async fn run() -> anyhow::Result<()> {
                             indicator_webview
                                 .evaluate_script(&indicator::input_mode_script(&input_method))
                                 .unwrap();
-                            let task_guard = task_guard.try_lock();
-
-                            if let Ok(mut task_guard) = task_guard {
-                                if let Some(task) = task_guard.take() {
-                                    task.abort();
-                                }
-
-                                *task_guard = Some(tokio::spawn(async move {
-                                    let _ = unsafe {
-                                        ShowWindow(
-                                            HWND(indicator_hwnd as *mut std::ffi::c_void),
-                                            SW_SHOWNOACTIVATE,
-                                        )
-                                    };
-                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                                    let _ = unsafe {
-                                        ShowWindow(
-                                            HWND(indicator_hwnd as *mut std::ffi::c_void),
-                                            SW_HIDE,
-                                        )
-                                    };
-                                }));
-                            }
+                            let _ = unsafe {
+                                ShowWindow(
+                                    HWND(indicator_hwnd as *mut std::ffi::c_void),
+                                    SW_SHOWNOACTIVATE,
+                                )
+                            };
+                            indicator_hide_at = Some(Instant::now() + INDICATOR_DURATION);
                         }
                     }
                 }
             },
             _ => (),
         }
+
+        if matches!(*control_flow, ControlFlow::ExitWithCode(_)) {
+            return;
+        }
+        if indicator_hide_at.is_some_and(|deadline| Instant::now() >= deadline) {
+            indicator_hide_at = None;
+            let _ = unsafe { ShowWindow(HWND(indicator_hwnd as *mut std::ffi::c_void), SW_HIDE) };
+        }
+        *control_flow = match indicator_hide_at {
+            Some(deadline) => ControlFlow::WaitUntil(deadline),
+            None => ControlFlow::Wait,
+        };
     });
 }

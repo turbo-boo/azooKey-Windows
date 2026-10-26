@@ -40,7 +40,7 @@ fn extract_ok_type(return_type: &ReturnType) -> Result<&Type, TokenStream> {
 /// HRESULT; any other error becomes E_FAIL.
 ///
 ///
-/// ```rust
+/// ```text
 /// #[macros::anyhow]
 /// fn some_func() -> anyhow::Result<Sometype> {
 ///     Ok(Sometype)

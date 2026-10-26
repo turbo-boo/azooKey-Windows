@@ -66,6 +66,28 @@ pub struct Composition {
     pub magic_request: Option<MagicRequest>,
 }
 
+impl Composition {
+    /// Composing and Previewing show text in a TSF composition; without one
+    /// there is nothing left to edit.
+    fn lost_tip_composition(&self) -> bool {
+        self.tip_composition.is_none()
+            && matches!(
+                self.state,
+                CompositionState::Composing | CompositionState::Previewing
+            )
+    }
+
+    /// Forgets the composition's text, candidates and pending AI request.
+    /// The TSF composition is left to the edit sessions that manage it.
+    pub fn reset(&mut self) {
+        let tip_composition = self.tip_composition.take();
+        *self = Composition {
+            tip_composition,
+            ..Composition::default()
+        };
+    }
+}
+
 /// An AI conversion running in the background for the text `source`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MagicRequest {
@@ -148,6 +170,22 @@ impl ITfCompositionSink_Impl for TextServiceFactory_Impl {
         self.handle_action(&actions, CompositionState::None)?;
 
         Ok(())
+    }
+}
+
+/// Hides the candidates and clears the converter after the TSF composition
+/// ended. The engine has already forgotten the composition, so a failure
+/// here must not undo that: the window shows candidates of a finished
+/// composition at worst, and edit_converter clears the converter again
+/// before the next composition uses it.
+fn release_ended_composition(ipc_service: &mut IPCService) {
+    let results = [
+        ipc_service.hide_window(),
+        ipc_service.set_candidates(vec![]),
+        ipc_service.clear_text(),
+    ];
+    for error in results.into_iter().filter_map(Result::err) {
+        tracing::warn!("Cleanup after the composition ended failed: {error:?}");
     }
 }
 
@@ -760,327 +798,36 @@ impl TextServiceFactory {
         let mut ipc_service = IMEState::ipc_service()?;
         let mut transition = transition;
 
-        // The text preceding the composition only changes when a composition
-        // starts or a prefix is committed (ShrinkText), so do not pay an edit
-        // session and a server round trip for it on every keystroke.
-        if actions.contains(&ClientAction::StartComposition) {
-            self.update_context(&preview)?;
-        }
+        let applied = (|| -> Result<()> {
+            // The text preceding the composition only changes when a composition
+            // starts or a prefix is committed (ShrinkText), so do not pay an edit
+            // session and a server round trip for it on every keystroke.
+            if actions.contains(&ClientAction::StartComposition) {
+                self.update_context(&preview)?;
+            }
 
-        for action in actions {
-            match action {
-                ClientAction::StartComposition => {
-                    self.start_composition()?;
-                    self.update_pos()?;
-                }
-                ClientAction::EndComposition => {
-                    self.end_composition()?;
-                    selection_index = 0;
-                    corresponding_count = 0;
-                    preview.clear();
-                    suffix.clear();
-                    raw_input.clear();
-                    composition_id = None;
-                    raw_hiragana.clear();
-                    candidates = Candidates::default();
-                    should_learn_candidate = false;
-                    ipc_service.hide_window()?;
-                    ipc_service.set_candidates(vec![])?;
-                    ipc_service.clear_text()?;
-                }
-                ClientAction::CancelComposition => {
-                    // Remove the marked text before ending the TSF composition so
-                    // shortcut keys and Escape do not commit a partial conversion.
-                    self.set_text("", "")?;
-                    self.end_composition()?;
-
-                    selection_index = 0;
-                    corresponding_count = 0;
-                    preview.clear();
-                    suffix.clear();
-                    raw_input.clear();
-                    composition_id = None;
-                    raw_hiragana.clear();
-                    candidates = Candidates::default();
-                    should_learn_candidate = false;
-                    transition = CompositionState::None;
-
-                    ipc_service.hide_window()?;
-                    ipc_service.set_candidates(vec![])?;
-                    ipc_service.clear_text()?;
-                    if let Err(error) = ipc_service.clear_post_composition_predictions() {
-                        tracing::warn!("Failed to clear prediction state while cancelling: {error:?}");
+            for action in actions {
+                match action {
+                    ClientAction::StartComposition => {
+                        self.start_composition()?;
+                        self.update_pos()?;
                     }
-                }
-                ClientAction::AppendText(text) => {
-                    let text = match mode {
-                        InputMode::Kana => to_fullwidth(text),
-                        InputMode::Latin => text.to_string(),
-                    };
-
-                    candidates = edit_converter(
-                        &mut ipc_service,
-                        &mut composition_id,
-                        &mut raw_input,
-                        |ipc| ipc.append_text(text.clone()),
-                    )?;
-                    let hiragana = candidates.hiragana.clone();
-                    let Some((text, sub_text, count)) =
-                        candidate_parts(&candidates, selection_index)
-                    else {
+                    ClientAction::EndComposition => {
+                        self.end_composition()?;
                         selection_index = 0;
                         corresponding_count = 0;
-                        preview = hiragana.clone();
-                        suffix.clear();
-                        raw_hiragana = hiragana;
-                        should_learn_candidate = false;
-                        self.set_text(&preview, "")?;
-                        ipc_service.hide_window()?;
-                        ipc_service.set_candidates(vec![])?;
-                        continue;
-                    };
-
-                    corresponding_count = count;
-                    preview = text.clone();
-                    suffix = sub_text.clone();
-                    raw_hiragana = hiragana.clone();
-                    should_learn_candidate =
-                        candidate_is_learnable(&candidates, selection_index as usize);
-
-                    self.set_text(&text, &sub_text)?;
-                    if candidates.is_converted {
-                        ipc_service.set_candidates(candidates.texts.clone())?;
-                        ipc_service.set_selection(selection_index as i32)?;
-                        ipc_service.show_window()?;
-                    } else {
-                        ipc_service.hide_window()?;
-                        ipc_service.set_candidates(vec![])?;
-                    }
-                }
-                ClientAction::RequestConversion => {
-                    let converted = edit_converter(
-                        &mut ipc_service,
-                        &mut composition_id,
-                        &mut raw_input,
-                        |ipc| ipc.request_conversion(),
-                    )?;
-                    if converted.texts.is_empty() {
-                        continue;
-                    }
-
-                    candidates = converted;
-                    selection_index = 0;
-                    let Some((text, sub_text, count)) = candidate_parts(&candidates, 0) else {
-                        ipc_service.hide_window()?;
-                        ipc_service.set_candidates(vec![])?;
-                        continue;
-                    };
-                    corresponding_count = count;
-                    preview = text.clone();
-                    suffix = sub_text.clone();
-                    if !candidates.hiragana.is_empty() {
-                        raw_hiragana = candidates.hiragana.clone();
-                    }
-                    should_learn_candidate = candidates
-                        .candidate_ids
-                        .first()
-                        .is_some_and(|id| *id >= 0);
-
-                    self.set_text(&text, &sub_text)?;
-                    ipc_service.set_candidates(candidates.texts.clone())?;
-                    ipc_service.set_selection(0)?;
-                    ipc_service.show_window()?;
-                    transition = CompositionState::Previewing;
-                }
-                ClientAction::CommitCandidate => {
-                    if should_learn_candidate {
-                        if let Some(candidate_id) =
-                            candidates.candidate_ids.get(selection_index as usize)
-                        {
-                            ipc_service.commit_candidate(*candidate_id)?;
-                        }
-                    }
-                    should_learn_candidate = false;
-                }
-                ClientAction::LoadPredictions => {
-                    let predictions = match ipc_service.get_post_composition_predictions() {
-                        Ok(predictions) => predictions,
-                        Err(error) => {
-                            tracing::warn!("Failed to load post-composition predictions: {error:?}");
-                            candidates = Candidates::default();
-                            transition = CompositionState::None;
-                            ipc_service.hide_window()?;
-                            ipc_service.set_candidates(vec![])?;
-                            continue;
-                        }
-                    };
-                    if predictions.texts.is_empty() {
-                        candidates = Candidates::default();
-                        transition = CompositionState::None;
-                        ipc_service.hide_window()?;
-                        ipc_service.set_candidates(vec![])?;
-                    } else {
-                        candidates = Candidates {
-                            texts: predictions.texts.clone(),
-                            sub_texts: vec![String::new(); predictions.texts.len()],
-                            hiragana: String::new(),
-                            corresponding_count: vec![0; predictions.texts.len()],
-                            candidate_ids: predictions.prediction_ids,
-                            is_converted: true,
-                            ..Candidates::default()
-                        };
-                        selection_index = 0;
                         preview.clear();
                         suffix.clear();
                         raw_input.clear();
                         composition_id = None;
                         raw_hiragana.clear();
-                        corresponding_count = 0;
-                        should_learn_candidate = false;
-                        ipc_service.set_candidates(candidates.texts.clone())?;
-                        ipc_service.set_selection(0)?;
-                        ipc_service.show_window()?;
-                        transition = CompositionState::Selecting;
-                    }
-                }
-                ClientAction::AcceptPrediction => {
-                    let Some(text) = candidates.texts.get(selection_index as usize).cloned() else {
-                        transition = CompositionState::None;
-                        ipc_service.hide_window()?;
-                        continue;
-                    };
-                    let Some(prediction_id) = candidates.candidate_ids.get(selection_index as usize).copied() else {
-                        transition = CompositionState::None;
-                        ipc_service.hide_window()?;
-                        continue;
-                    };
-
-                    self.start_composition()?;
-                    self.set_text(&text, "")?;
-                    self.update_pos()?;
-                    self.end_composition()?;
-
-                    let predictions = match ipc_service.commit_prediction(prediction_id) {
-                        Ok(predictions) => predictions,
-                        Err(error) => {
-                            tracing::warn!("Failed to update post-composition predictions: {error:?}");
-                            candidates = Candidates::default();
-                            selection_index = 0;
-                            ipc_service.hide_window()?;
-                            ipc_service.set_candidates(vec![])?;
-                            transition = CompositionState::None;
-                            continue;
-                        }
-                    };
-                    if predictions.texts.is_empty() {
                         candidates = Candidates::default();
-                        selection_index = 0;
-                        ipc_service.hide_window()?;
-                        ipc_service.set_candidates(vec![])?;
-                        transition = CompositionState::None;
-                    } else {
-                        candidates = Candidates {
-                            texts: predictions.texts.clone(),
-                            sub_texts: vec![String::new(); predictions.texts.len()],
-                            hiragana: String::new(),
-                            corresponding_count: vec![0; predictions.texts.len()],
-                            candidate_ids: predictions.prediction_ids,
-                            is_converted: true,
-                            ..Candidates::default()
-                        };
-                        selection_index = 0;
-                        ipc_service.set_candidates(candidates.texts.clone())?;
-                        ipc_service.set_selection(0)?;
-                        ipc_service.show_window()?;
-                        transition = CompositionState::Selecting;
+                        should_learn_candidate = false;
+                        release_ended_composition(&mut ipc_service);
                     }
-                    preview.clear();
-                    suffix.clear();
-                    raw_input.clear();
-                    composition_id = None;
-                    raw_hiragana.clear();
-                    corresponding_count = 0;
-                    should_learn_candidate = false;
-                }
-                ClientAction::DismissPredictions => {
-                    ipc_service.clear_post_composition_predictions()?;
-                    candidates = Candidates::default();
-                    selection_index = 0;
-                    preview.clear();
-                    suffix.clear();
-                    raw_input.clear();
-                    composition_id = None;
-                    raw_hiragana.clear();
-                    corresponding_count = 0;
-                    should_learn_candidate = false;
-                    ipc_service.hide_window()?;
-                    ipc_service.set_candidates(vec![])?;
-                }
-                ClientAction::MagicConvert => {
-                    // The HTTP API can take up to a minute: request it in the
-                    // background and show the candidates when they arrive
-                    // (ShowMagicCandidates), unless the composition changed.
-                    let source = magic_source(&preview, &suffix, &raw_hiragana);
-                    let request = MagicRequest {
-                        id: NEXT_MAGIC_REQUEST.fetch_add(1, Ordering::Relaxed),
-                        source: source.clone(),
-                    };
-                    let sender = self
-                        .borrow()?
-                        .message_window
-                        .as_ref()
-                        .context("message window is not available")?
-                        .sender();
-                    magic_request = Some(request.clone());
-                    magic_convert_in_background(source, move |candidates| {
-                        sender.send(MagicResult {
-                            request,
-                            candidates,
-                        })
-                    })?;
-                }
-                ClientAction::ShowMagicCandidates(converted) => {
-                    magic_request = None;
-                    // The AI candidate replaces the whole composition, so it
-                    // covers every input unit (not the number of kana).
-                    let count = candidates.input_count;
-                    candidates = Candidates {
-                        texts: converted.clone(),
-                        sub_texts: vec![String::new(); converted.len()],
-                        hiragana: raw_hiragana.clone(),
-                        corresponding_count: vec![count; converted.len()],
-                        candidate_ids: vec![],
-                        is_converted: true,
-                        input_count: count,
-                        input_text: raw_input.clone(),
-                        composition_id: candidates.composition_id,
-                    };
-                    selection_index = 0;
-                    corresponding_count = count;
-                    preview = converted.first().cloned().unwrap_or_default();
-                    suffix.clear();
-                    should_learn_candidate = false;
-                    self.set_text(&preview, "")?;
-                    ipc_service.set_candidates(candidates.texts.clone())?;
-                    ipc_service.set_selection(0)?;
-                    ipc_service.show_window()?;
-                }
-                ClientAction::RemoveText => {
-                    // The converter may rewrite romaji it keeps into kana
-                    // ("sha" -> "し"): only its input says what remains, and
-                    // edit_converter takes raw_input from it.
-                    candidates = edit_converter(
-                        &mut ipc_service,
-                        &mut composition_id,
-                        &mut raw_input,
-                        |ipc| ipc.remove_text(),
-                    )?;
-                    let hiragana = candidates.hiragana.clone();
-
-                    // The visible candidate can have a different character count
-                    // from the converter input. End the composition only after the
-                    // converter itself reports that no input remains.
-                    if hiragana.is_empty() {
+                    ClientAction::CancelComposition => {
+                        // Remove the marked text before ending the TSF composition so
+                        // shortcut keys and Escape do not commit a partial conversion.
                         self.set_text("", "")?;
                         self.end_composition()?;
 
@@ -1095,108 +842,40 @@ impl TextServiceFactory {
                         should_learn_candidate = false;
                         transition = CompositionState::None;
 
-                        ipc_service.hide_window()?;
-                        ipc_service.set_candidates(vec![])?;
-                        ipc_service.clear_text()?;
-                        continue;
-                    }
-
-                    // The converter returns a fresh candidate list, so the
-                    // previous selection index does not apply to it.
-                    selection_index = 0;
-                    let view = view_after_remove(&candidates);
-                    corresponding_count = view.corresponding_count;
-                    preview = view.text;
-                    suffix = view.sub_text;
-                    raw_hiragana = hiragana;
-                    should_learn_candidate = view.learnable;
-
-                    self.set_text(&preview, &suffix)?;
-                    if view.show_candidates {
-                        ipc_service.set_candidates(candidates.texts.clone())?;
-                        ipc_service.set_selection(selection_index)?;
-                        ipc_service.show_window()?;
-                    } else {
-                        ipc_service.hide_window()?;
-                        ipc_service.set_candidates(vec![])?;
-                    }
-                }
-                ClientAction::SetIMEMode(mode) => {
-                    // An empty composition only locates the caret for the mode
-                    // indicator; the mode must still switch when the document
-                    // cannot be edited right now.
-                    match self.start_composition() {
-                        Ok(()) => {
-                            self.update_pos()?;
-                            self.end_composition()?;
-                        }
-                        Err(error) => {
-                            tracing::warn!("Cannot locate the caret for the indicator: {error:?}")
+                        release_ended_composition(&mut ipc_service);
+                        if let Err(error) = ipc_service.clear_post_composition_predictions() {
+                            tracing::warn!("Failed to clear prediction state while cancelling: {error:?}");
                         }
                     }
-                    // After the indicator composition: in IMM32 applications
-                    // starting one opens the IME again.
-                    self.update_open_close(mode);
+                    ClientAction::AppendText(text) => {
+                        let text = match mode {
+                            InputMode::Kana => to_fullwidth(text),
+                            InputMode::Latin => text.to_string(),
+                        };
 
-                    // Hold the process-wide state only for the assignment: the
-                    // language bar (GetIcon) and other threads' keys read it
-                    // while the COM and IPC calls below run.
-                    IMEState::get()?.input_mode = mode.clone();
-
-                    // update the language bar
-                    self.update_lang_bar()?;
-
-                    let mode = match mode {
-                        InputMode::Latin => "A",
-                        InputMode::Kana => "あ",
-                    };
-
-                    ipc_service.set_input_mode(mode)?;
-
-                    selection_index = 0;
-                    corresponding_count = 0;
-                    preview.clear();
-                    suffix.clear();
-                    raw_input.clear();
-                    composition_id = None;
-                    raw_hiragana.clear();
-                    should_learn_candidate = false;
-                    ipc_service.clear_text()?;
-                }
-                ClientAction::SetSelection(selection) => {
-                    let candidates = {
-                        let text_service = self.borrow()?;
-                        let composition = text_service.borrow_composition()?.clone();
-                        let candidates = composition.candidates.clone();
-                        candidates
-                    };
-
-                    let texts = candidates.texts.clone();
-
-                    let Some(next_index) =
-                        next_selection_index(texts.len(), selection_index, selection)
-                    else {
-                        selection_index = 0;
-                        should_learn_candidate = false;
-                        ipc_service.hide_window()?;
-                        ipc_service.set_candidates(vec![])?;
-                        continue;
-                    };
-                    selection_index = next_index;
-
-                    ipc_service.set_selection(selection_index)?;
-                    if composition.state != CompositionState::Selecting {
+                        candidates = edit_converter(
+                            &mut ipc_service,
+                            &mut composition_id,
+                            &mut raw_input,
+                            |ipc| ipc.append_text(text.clone()),
+                        )?;
+                        let hiragana = candidates.hiragana.clone();
                         let Some((text, sub_text, count)) =
                             candidate_parts(&candidates, selection_index)
                         else {
+                            selection_index = 0;
+                            corresponding_count = 0;
+                            preview = hiragana.clone();
+                            suffix.clear();
+                            raw_hiragana = hiragana;
                             should_learn_candidate = false;
+                            self.set_text(&preview, "")?;
                             ipc_service.hide_window()?;
                             ipc_service.set_candidates(vec![])?;
                             continue;
                         };
-                        let hiragana = candidates.hiragana.clone();
-                        corresponding_count = count;
 
+                        corresponding_count = count;
                         preview = text.clone();
                         suffix = sub_text.clone();
                         raw_hiragana = hiragana.clone();
@@ -1204,95 +883,469 @@ impl TextServiceFactory {
                             candidate_is_learnable(&candidates, selection_index as usize);
 
                         self.set_text(&text, &sub_text)?;
+                        if candidates.is_converted {
+                            ipc_service.set_candidates(candidates.texts.clone())?;
+                            ipc_service.set_selection(selection_index as i32)?;
+                            ipc_service.show_window()?;
+                        } else {
+                            ipc_service.hide_window()?;
+                            ipc_service.set_candidates(vec![])?;
+                        }
                     }
-                }
-                ClientAction::ShrinkText(text) => {
-                    let shrunk = edit_converter(
-                        &mut ipc_service,
-                        &mut composition_id,
-                        &mut raw_input,
-                        |ipc| ipc.shrink_text(corresponding_count),
-                    )?;
-                    let text = match mode {
-                        InputMode::Kana => to_fullwidth(text),
-                        InputMode::Latin => text.to_string(),
-                    };
-                    candidates = if text.is_empty() {
-                        shrunk
-                    } else {
-                        edit_converter(
+                    ClientAction::RequestConversion => {
+                        let converted = edit_converter(
                             &mut ipc_service,
                             &mut composition_id,
                             &mut raw_input,
-                            |ipc| ipc.append_text(text.clone()),
-                        )?
-                    };
-                    selection_index = 0;
+                            |ipc| ipc.request_conversion(),
+                        )?;
+                        if converted.texts.is_empty() {
+                            continue;
+                        }
 
-                    let hiragana = candidates.hiragana.clone();
-                    let Some((text, sub_text, count)) =
-                        candidate_parts(&candidates, selection_index)
-                    else {
-                        corresponding_count = 0;
-                        let remaining = hiragana.clone();
-                        self.shift_start(&preview, &remaining)?;
-                        preview = remaining;
-                        self.update_context(&preview)?;
+                        candidates = converted;
+                        selection_index = 0;
+                        let Some((text, sub_text, count)) = candidate_parts(&candidates, 0) else {
+                            ipc_service.hide_window()?;
+                            ipc_service.set_candidates(vec![])?;
+                            continue;
+                        };
+                        corresponding_count = count;
+                        preview = text.clone();
+                        suffix = sub_text.clone();
+                        if !candidates.hiragana.is_empty() {
+                            raw_hiragana = candidates.hiragana.clone();
+                        }
+                        should_learn_candidate = candidates
+                            .candidate_ids
+                            .first()
+                            .is_some_and(|id| *id >= 0);
+
+                        self.set_text(&text, &sub_text)?;
+                        ipc_service.set_candidates(candidates.texts.clone())?;
+                        ipc_service.set_selection(0)?;
+                        ipc_service.show_window()?;
+                        transition = CompositionState::Previewing;
+                    }
+                    ClientAction::CommitCandidate => {
+                        if should_learn_candidate {
+                            if let Some(candidate_id) =
+                                candidates.candidate_ids.get(selection_index as usize)
+                            {
+                                ipc_service.commit_candidate(*candidate_id)?;
+                            }
+                        }
+                        should_learn_candidate = false;
+                    }
+                    ClientAction::LoadPredictions => {
+                        let predictions = match ipc_service.get_post_composition_predictions() {
+                            Ok(predictions) => predictions,
+                            Err(error) => {
+                                tracing::warn!("Failed to load post-composition predictions: {error:?}");
+                                candidates = Candidates::default();
+                                transition = CompositionState::None;
+                                ipc_service.hide_window()?;
+                                ipc_service.set_candidates(vec![])?;
+                                continue;
+                            }
+                        };
+                        if predictions.texts.is_empty() {
+                            candidates = Candidates::default();
+                            transition = CompositionState::None;
+                            ipc_service.hide_window()?;
+                            ipc_service.set_candidates(vec![])?;
+                        } else {
+                            candidates = Candidates {
+                                texts: predictions.texts.clone(),
+                                sub_texts: vec![String::new(); predictions.texts.len()],
+                                hiragana: String::new(),
+                                corresponding_count: vec![0; predictions.texts.len()],
+                                candidate_ids: predictions.prediction_ids,
+                                is_converted: true,
+                                ..Candidates::default()
+                            };
+                            selection_index = 0;
+                            preview.clear();
+                            suffix.clear();
+                            raw_input.clear();
+                            composition_id = None;
+                            raw_hiragana.clear();
+                            corresponding_count = 0;
+                            should_learn_candidate = false;
+                            ipc_service.set_candidates(candidates.texts.clone())?;
+                            ipc_service.set_selection(0)?;
+                            ipc_service.show_window()?;
+                            transition = CompositionState::Selecting;
+                        }
+                    }
+                    ClientAction::AcceptPrediction => {
+                        let Some(text) = candidates.texts.get(selection_index as usize).cloned() else {
+                            transition = CompositionState::None;
+                            ipc_service.hide_window()?;
+                            continue;
+                        };
+                        let Some(prediction_id) = candidates.candidate_ids.get(selection_index as usize).copied() else {
+                            transition = CompositionState::None;
+                            ipc_service.hide_window()?;
+                            continue;
+                        };
+
+                        self.start_composition()?;
+                        self.set_text(&text, "")?;
+                        self.update_pos()?;
+                        self.end_composition()?;
+
+                        let predictions = match ipc_service.commit_prediction(prediction_id) {
+                            Ok(predictions) => predictions,
+                            Err(error) => {
+                                tracing::warn!("Failed to update post-composition predictions: {error:?}");
+                                candidates = Candidates::default();
+                                selection_index = 0;
+                                ipc_service.hide_window()?;
+                                ipc_service.set_candidates(vec![])?;
+                                transition = CompositionState::None;
+                                continue;
+                            }
+                        };
+                        if predictions.texts.is_empty() {
+                            candidates = Candidates::default();
+                            selection_index = 0;
+                            ipc_service.hide_window()?;
+                            ipc_service.set_candidates(vec![])?;
+                            transition = CompositionState::None;
+                        } else {
+                            candidates = Candidates {
+                                texts: predictions.texts.clone(),
+                                sub_texts: vec![String::new(); predictions.texts.len()],
+                                hiragana: String::new(),
+                                corresponding_count: vec![0; predictions.texts.len()],
+                                candidate_ids: predictions.prediction_ids,
+                                is_converted: true,
+                                ..Candidates::default()
+                            };
+                            selection_index = 0;
+                            ipc_service.set_candidates(candidates.texts.clone())?;
+                            ipc_service.set_selection(0)?;
+                            ipc_service.show_window()?;
+                            transition = CompositionState::Selecting;
+                        }
+                        preview.clear();
                         suffix.clear();
-                        raw_hiragana = hiragana;
+                        raw_input.clear();
+                        composition_id = None;
+                        raw_hiragana.clear();
+                        corresponding_count = 0;
+                        should_learn_candidate = false;
+                    }
+                    ClientAction::DismissPredictions => {
+                        ipc_service.clear_post_composition_predictions()?;
+                        candidates = Candidates::default();
+                        selection_index = 0;
+                        preview.clear();
+                        suffix.clear();
+                        raw_input.clear();
+                        composition_id = None;
+                        raw_hiragana.clear();
+                        corresponding_count = 0;
                         should_learn_candidate = false;
                         ipc_service.hide_window()?;
                         ipc_service.set_candidates(vec![])?;
-                        transition = CompositionState::Composing;
-                        continue;
-                    };
-                    self.shift_start(&preview, &text)?;
-
-                    corresponding_count = count;
-                    preview = text.clone();
-                    self.update_context(&preview)?;
-                    suffix = sub_text.clone();
-                    raw_hiragana = hiragana.clone();
-                    should_learn_candidate =
-                        candidate_is_learnable(&candidates, selection_index as usize);
-
-                    if candidates.is_converted {
-                        ipc_service.set_candidates(candidates.texts.clone())?;
-                        ipc_service.set_selection(selection_index as i32)?;
-                        ipc_service.show_window()?;
-                    } else {
-                        ipc_service.hide_window()?;
-                        ipc_service.set_candidates(vec![])?;
                     }
-                    self.update_pos()?;
+                    ClientAction::MagicConvert => {
+                        // The HTTP API can take up to a minute: request it in the
+                        // background and show the candidates when they arrive
+                        // (ShowMagicCandidates), unless the composition changed.
+                        let source = magic_source(&preview, &suffix, &raw_hiragana);
+                        let request = MagicRequest {
+                            id: NEXT_MAGIC_REQUEST.fetch_add(1, Ordering::Relaxed),
+                            source: source.clone(),
+                        };
+                        let sender = self
+                            .borrow()?
+                            .message_window
+                            .as_ref()
+                            .context("message window is not available")?
+                            .sender();
+                        magic_request = Some(request.clone());
+                        magic_convert_in_background(source, move |candidates| {
+                            sender.send(MagicResult {
+                                request,
+                                candidates,
+                            })
+                        })?;
+                    }
+                    ClientAction::ShowMagicCandidates(converted) => {
+                        magic_request = None;
+                        // The AI candidate replaces the whole composition, so it
+                        // covers every input unit (not the number of kana).
+                        let count = candidates.input_count;
+                        candidates = Candidates {
+                            texts: converted.clone(),
+                            sub_texts: vec![String::new(); converted.len()],
+                            hiragana: raw_hiragana.clone(),
+                            corresponding_count: vec![count; converted.len()],
+                            candidate_ids: vec![],
+                            is_converted: true,
+                            input_count: count,
+                            input_text: raw_input.clone(),
+                            composition_id: candidates.composition_id,
+                        };
+                        selection_index = 0;
+                        corresponding_count = count;
+                        preview = converted.first().cloned().unwrap_or_default();
+                        suffix.clear();
+                        should_learn_candidate = false;
+                        self.set_text(&preview, "")?;
+                        ipc_service.set_candidates(candidates.texts.clone())?;
+                        ipc_service.set_selection(0)?;
+                        ipc_service.show_window()?;
+                    }
+                    ClientAction::RemoveText => {
+                        // The converter may rewrite romaji it keeps into kana
+                        // ("sha" -> "し"): only its input says what remains, and
+                        // edit_converter takes raw_input from it.
+                        candidates = edit_converter(
+                            &mut ipc_service,
+                            &mut composition_id,
+                            &mut raw_input,
+                            |ipc| ipc.remove_text(),
+                        )?;
+                        let hiragana = candidates.hiragana.clone();
 
-                    transition = CompositionState::Composing;
-                }
-                ClientAction::SetTextWithType(set_type) => {
-                    let text = match set_type {
-                        SetTextType::Hiragana => raw_hiragana.clone(),
-                        SetTextType::Katakana => to_katakana(&raw_hiragana),
-                        SetTextType::HalfKatakana => to_half_katakana(&raw_hiragana),
-                        // the converter holds kana-mode symbols in their
-                        // Japanese form ("ー"); F9 shows the ASCII key's
-                        SetTextType::FullLatin => to_fullwidth_latin(&to_halfwidth(&raw_input)),
-                        SetTextType::HalfLatin => to_halfwidth(&raw_input),
-                    };
+                        // The visible candidate can have a different character count
+                        // from the converter input. End the composition only after the
+                        // converter itself reports that no input remains.
+                        if hiragana.is_empty() {
+                            self.set_text("", "")?;
+                            self.end_composition()?;
 
-                    // The displayed text now stands for the whole composition;
-                    // keep preview/suffix and the commit range in sync so the
-                    // next key commits exactly what is shown.
-                    preview = text;
-                    suffix.clear();
-                    corresponding_count = candidates.input_count;
-                    should_learn_candidate = false;
-                    self.set_text(&preview, "")?;
+                            selection_index = 0;
+                            corresponding_count = 0;
+                            preview.clear();
+                            suffix.clear();
+                            raw_input.clear();
+                            composition_id = None;
+                            raw_hiragana.clear();
+                            candidates = Candidates::default();
+                            should_learn_candidate = false;
+                            transition = CompositionState::None;
+
+                            release_ended_composition(&mut ipc_service);
+                            continue;
+                        }
+
+                        // The converter returns a fresh candidate list, so the
+                        // previous selection index does not apply to it.
+                        selection_index = 0;
+                        let view = view_after_remove(&candidates);
+                        corresponding_count = view.corresponding_count;
+                        preview = view.text;
+                        suffix = view.sub_text;
+                        raw_hiragana = hiragana;
+                        should_learn_candidate = view.learnable;
+
+                        self.set_text(&preview, &suffix)?;
+                        if view.show_candidates {
+                            ipc_service.set_candidates(candidates.texts.clone())?;
+                            ipc_service.set_selection(selection_index)?;
+                            ipc_service.show_window()?;
+                        } else {
+                            ipc_service.hide_window()?;
+                            ipc_service.set_candidates(vec![])?;
+                        }
+                    }
+                    ClientAction::SetIMEMode(mode) => {
+                        // An empty composition only locates the caret for the mode
+                        // indicator; the mode must still switch when the document
+                        // cannot be edited right now.
+                        match self.start_composition() {
+                            Ok(()) => {
+                                self.update_pos()?;
+                                self.end_composition()?;
+                            }
+                            Err(error) => {
+                                tracing::warn!("Cannot locate the caret for the indicator: {error:?}")
+                            }
+                        }
+                        // After the indicator composition: in IMM32 applications
+                        // starting one opens the IME again.
+                        self.update_open_close(mode);
+
+                        // Hold the process-wide state only for the assignment: the
+                        // language bar (GetIcon) and other threads' keys read it
+                        // while the COM and IPC calls below run.
+                        IMEState::get()?.input_mode = mode.clone();
+
+                        // update the language bar
+                        self.update_lang_bar()?;
+
+                        let mode = match mode {
+                            InputMode::Latin => "A",
+                            InputMode::Kana => "あ",
+                        };
+
+                        ipc_service.set_input_mode(mode)?;
+
+                        selection_index = 0;
+                        corresponding_count = 0;
+                        preview.clear();
+                        suffix.clear();
+                        raw_input.clear();
+                        composition_id = None;
+                        raw_hiragana.clear();
+                        should_learn_candidate = false;
+                        // the next composition clears the converter anyway
+                        if let Err(error) = ipc_service.clear_text() {
+                            tracing::warn!("Failed to clear the converter: {error:?}");
+                        }
+                    }
+                    ClientAction::SetSelection(selection) => {
+                        let candidates = {
+                            let text_service = self.borrow()?;
+                            let composition = text_service.borrow_composition()?.clone();
+                            let candidates = composition.candidates.clone();
+                            candidates
+                        };
+
+                        let texts = candidates.texts.clone();
+
+                        let Some(next_index) =
+                            next_selection_index(texts.len(), selection_index, selection)
+                        else {
+                            selection_index = 0;
+                            should_learn_candidate = false;
+                            ipc_service.hide_window()?;
+                            ipc_service.set_candidates(vec![])?;
+                            continue;
+                        };
+                        selection_index = next_index;
+
+                        ipc_service.set_selection(selection_index)?;
+                        if composition.state != CompositionState::Selecting {
+                            let Some((text, sub_text, count)) =
+                                candidate_parts(&candidates, selection_index)
+                            else {
+                                should_learn_candidate = false;
+                                ipc_service.hide_window()?;
+                                ipc_service.set_candidates(vec![])?;
+                                continue;
+                            };
+                            let hiragana = candidates.hiragana.clone();
+                            corresponding_count = count;
+
+                            preview = text.clone();
+                            suffix = sub_text.clone();
+                            raw_hiragana = hiragana.clone();
+                            should_learn_candidate =
+                                candidate_is_learnable(&candidates, selection_index as usize);
+
+                            self.set_text(&text, &sub_text)?;
+                        }
+                    }
+                    ClientAction::ShrinkText(text) => {
+                        let shrunk = edit_converter(
+                            &mut ipc_service,
+                            &mut composition_id,
+                            &mut raw_input,
+                            |ipc| ipc.shrink_text(corresponding_count),
+                        )?;
+                        let text = match mode {
+                            InputMode::Kana => to_fullwidth(text),
+                            InputMode::Latin => text.to_string(),
+                        };
+                        candidates = if text.is_empty() {
+                            shrunk
+                        } else {
+                            edit_converter(
+                                &mut ipc_service,
+                                &mut composition_id,
+                                &mut raw_input,
+                                |ipc| ipc.append_text(text.clone()),
+                            )?
+                        };
+                        selection_index = 0;
+
+                        let hiragana = candidates.hiragana.clone();
+                        let Some((text, sub_text, count)) =
+                            candidate_parts(&candidates, selection_index)
+                        else {
+                            corresponding_count = 0;
+                            let remaining = hiragana.clone();
+                            self.shift_start(&preview, &remaining)?;
+                            preview = remaining;
+                            self.update_context(&preview)?;
+                            suffix.clear();
+                            raw_hiragana = hiragana;
+                            should_learn_candidate = false;
+                            ipc_service.hide_window()?;
+                            ipc_service.set_candidates(vec![])?;
+                            transition = CompositionState::Composing;
+                            continue;
+                        };
+                        self.shift_start(&preview, &text)?;
+
+                        corresponding_count = count;
+                        preview = text.clone();
+                        self.update_context(&preview)?;
+                        suffix = sub_text.clone();
+                        raw_hiragana = hiragana.clone();
+                        should_learn_candidate =
+                            candidate_is_learnable(&candidates, selection_index as usize);
+
+                        if candidates.is_converted {
+                            ipc_service.set_candidates(candidates.texts.clone())?;
+                            ipc_service.set_selection(selection_index as i32)?;
+                            ipc_service.show_window()?;
+                        } else {
+                            ipc_service.hide_window()?;
+                            ipc_service.set_candidates(vec![])?;
+                        }
+                        self.update_pos()?;
+
+                        transition = CompositionState::Composing;
+                    }
+                    ClientAction::SetTextWithType(set_type) => {
+                        let text = match set_type {
+                            SetTextType::Hiragana => raw_hiragana.clone(),
+                            SetTextType::Katakana => to_katakana(&raw_hiragana),
+                            SetTextType::HalfKatakana => to_half_katakana(&raw_hiragana),
+                            // the converter holds kana-mode symbols in their
+                            // Japanese form ("ー"); F9 shows the ASCII key's
+                            SetTextType::FullLatin => to_fullwidth_latin(&to_halfwidth(&raw_input)),
+                            SetTextType::HalfLatin => to_halfwidth(&raw_input),
+                        };
+
+                        // The displayed text now stands for the whole composition;
+                        // keep preview/suffix and the commit range in sync so the
+                        // next key commits exactly what is shown.
+                        preview = text;
+                        suffix.clear();
+                        corresponding_count = candidates.input_count;
+                        should_learn_candidate = false;
+                        self.set_text(&preview, "")?;
+                    }
                 }
             }
-        }
+            Ok(())
+        })();
 
         let text_service = self.borrow()?;
         let mut composition = text_service.borrow_mut_composition()?;
+
+        if let Err(error) = applied {
+            // The actions stopped part way. The converter may have applied
+            // an edit whose result was never shown: replay the known input
+            // before the next edit. A TSF composition that already ended
+            // cannot be continued: forget it instead of composing without it.
+            composition.composition_id = None;
+            if composition.lost_tip_composition() {
+                composition.reset();
+                drop(composition);
+                drop(text_service);
+                release_ended_composition(&mut ipc_service);
+            }
+            return Err(error);
+        }
 
         composition.preview = preview.clone();
         composition.state = transition;
@@ -1305,6 +1358,16 @@ impl TextServiceFactory {
         composition.suffix = suffix.clone();
         composition.corresponding_count = corresponding_count;
         composition.magic_request = magic_request;
+
+        // The application can end the composition while an edit session
+        // runs (OnCompositionTerminated), after which the actions continued
+        // without one.
+        if composition.lost_tip_composition() {
+            composition.reset();
+            drop(composition);
+            drop(text_service);
+            release_ended_composition(&mut ipc_service);
+        }
 
         Ok(())
     }
@@ -1519,5 +1582,35 @@ mod tests {
         assert!(!converter_lost_composition(Some(7), &response));
         // server restart, or another connection took the converter over
         assert!(converter_lost_composition(Some(6), &response));
+    }
+
+    #[test]
+    fn composing_without_a_tsf_composition_is_reset() {
+        let composing = Composition {
+            preview: "かな".to_string(),
+            raw_input: "kana".to_string(),
+            composition_id: Some(3),
+            state: CompositionState::Composing,
+            magic_request: Some(MagicRequest {
+                id: 1,
+                source: "かな".to_string(),
+            }),
+            ..Composition::default()
+        };
+        assert!(composing.lost_tip_composition());
+
+        let mut reset = composing;
+        reset.reset();
+        assert_eq!(reset.state, CompositionState::None);
+        assert!(reset.preview.is_empty() && reset.raw_input.is_empty());
+        assert_eq!(reset.composition_id, None);
+        assert_eq!(reset.magic_request, None);
+
+        // predictions are shown without a TSF composition
+        let selecting = Composition {
+            state: CompositionState::Selecting,
+            ..Composition::default()
+        };
+        assert!(!selecting.lost_tip_composition());
     }
 }

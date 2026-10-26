@@ -307,16 +307,26 @@ impl TextServiceFactory {
                         let range = composition.GetRange()?;
                         range.SetText(cookie, TF_ST_CORRECTION, &text)?;
 
-                        // first, set the display attribute to the "text" part
-                        let text_range = range.Clone()?;
-                        text_range.Collapse(cookie, TF_ANCHOR_START)?;
-                        let mut shifted: i32 = 0;
-                        text_range.ShiftEnd(cookie, text_len, &mut shifted, std::ptr::null())?;
-                        let display_attribute = display_attribute_atom.get(&GUID_DISPLAY_ATTRIBUTE);
-                        if let Some(display_attribute) = display_attribute {
-                            let pvar = VARIANT::from(*display_attribute as i32);
-                            let prop = context.GetProperty(&GUID_PROP_ATTRIBUTE)?;
-                            prop.SetValue(cookie, &text_range, &pvar)?;
+                        // first, set the display attribute to the "text" part.
+                        // SetValue fails on an empty range, which deleting the
+                        // last character produces.
+                        if text_len > 0 {
+                            let text_range = range.Clone()?;
+                            text_range.Collapse(cookie, TF_ANCHOR_START)?;
+                            let mut shifted: i32 = 0;
+                            text_range.ShiftEnd(
+                                cookie,
+                                text_len,
+                                &mut shifted,
+                                std::ptr::null(),
+                            )?;
+                            let display_attribute =
+                                display_attribute_atom.get(&GUID_DISPLAY_ATTRIBUTE);
+                            if let Some(display_attribute) = display_attribute {
+                                let pvar = VARIANT::from(*display_attribute as i32);
+                                let prop = context.GetProperty(&GUID_PROP_ATTRIBUTE)?;
+                                prop.SetValue(cookie, &text_range, &pvar)?;
+                            }
                         }
 
                         range.Collapse(cookie, TF_ANCHOR_END)?;

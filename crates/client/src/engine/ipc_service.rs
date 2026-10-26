@@ -76,6 +76,8 @@ pub struct Candidates {
     pub input_count: i32,
     /// The input units themselves, one character each.
     pub input_text: String,
+    /// The converter's composition these candidates belong to.
+    pub composition_id: u64,
 }
 
 impl Candidates {
@@ -93,6 +95,7 @@ impl Candidates {
             is_converted: composing_text.is_converted,
             input_count: composing_text.input_count,
             input_text: composing_text.input_text,
+            composition_id: composing_text.composition_id,
             hiragana: composing_text.hiragana,
         })
     }

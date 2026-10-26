@@ -12,7 +12,7 @@ use super::{
     client_action::{ClientAction, SetSelectionType, SetTextType},
     full_width::{to_fullwidth, to_fullwidth_latin, to_halfwidth},
     input_mode::InputMode,
-    ipc_service::{magic_convert_in_background, Candidates},
+    ipc_service::{magic_convert_in_background, Candidates, IPCService},
     state::IMEState,
     text_util::{to_half_katakana, to_katakana},
     user_action::{consume_translation, Function, Navigation},
@@ -57,6 +57,11 @@ pub struct Composition {
 
     pub state: CompositionState,
     pub tip_composition: Option<ITfComposition>,
+    // ComposingText.composition_id of the converter's composition holding
+    // raw_input; None when the converter's content is not known to match
+    // (no composition yet, or after a failure): the next edit clears the
+    // converter and replays raw_input first
+    pub composition_id: Option<u64>,
     // the AI conversion whose result the composition is waiting for
     pub magic_request: Option<MagicRequest>,
 }
@@ -144,6 +149,47 @@ impl ITfCompositionSink_Impl for TextServiceFactory_Impl {
 
         Ok(())
     }
+}
+
+/// Whether a response shows that the converter no longer holds the
+/// composition with id `held`: the server restarted, or another connection
+/// took the converter over and it started afresh.
+fn converter_lost_composition(held: Option<u64>, response: &Candidates) -> bool {
+    held.is_some_and(|held| held != response.composition_id)
+}
+
+/// Makes the converter hold exactly `raw_input` as a new composition.
+fn restore_converter(ipc_service: &mut IPCService, raw_input: &str) -> Result<()> {
+    ipc_service.clear_text()?;
+    if !raw_input.is_empty() {
+        ipc_service.append_text(raw_input.to_string())?;
+    }
+    Ok(())
+}
+
+/// Applies `edit` to the converter's copy of this composition and records
+/// the converter's composition id and input. If the converter's content is
+/// unknown, or the response shows it lost the composition, the composition
+/// is replayed from `raw_input` (the input before this edit) so the edit
+/// applies to the text the user typed, not to an empty or foreign one.
+fn edit_converter(
+    ipc_service: &mut IPCService,
+    composition_id: &mut Option<u64>,
+    raw_input: &mut String,
+    mut edit: impl FnMut(&mut IPCService) -> Result<Candidates>,
+) -> Result<Candidates> {
+    if composition_id.is_none() {
+        restore_converter(ipc_service, raw_input)?;
+    }
+    let mut candidates = edit(ipc_service)?;
+    if converter_lost_composition(*composition_id, &candidates) {
+        tracing::warn!("The converter lost the composition; replaying its input");
+        restore_converter(ipc_service, raw_input)?;
+        candidates = edit(ipc_service)?;
+    }
+    *composition_id = Some(candidates.composition_id);
+    *raw_input = candidates.input_text.clone();
+    Ok(candidates)
 }
 
 fn conversion_key_action(is_converted: bool) -> ClientAction {
@@ -704,6 +750,7 @@ impl TextServiceFactory {
         let mut preview = composition.preview.clone();
         let mut suffix = composition.suffix.clone();
         let mut raw_input = composition.raw_input.clone();
+        let mut composition_id = composition.composition_id;
         let mut raw_hiragana = composition.raw_hiragana.clone();
         let mut corresponding_count = composition.corresponding_count.clone();
         let mut candidates = composition.candidates.clone();
@@ -733,6 +780,7 @@ impl TextServiceFactory {
                     preview.clear();
                     suffix.clear();
                     raw_input.clear();
+                    composition_id = None;
                     raw_hiragana.clear();
                     candidates = Candidates::default();
                     should_learn_candidate = false;
@@ -751,6 +799,7 @@ impl TextServiceFactory {
                     preview.clear();
                     suffix.clear();
                     raw_input.clear();
+                    composition_id = None;
                     raw_hiragana.clear();
                     candidates = Candidates::default();
                     should_learn_candidate = false;
@@ -769,8 +818,12 @@ impl TextServiceFactory {
                         InputMode::Latin => text.to_string(),
                     };
 
-                    candidates = ipc_service.append_text(text.clone())?;
-                    raw_input = candidates.input_text.clone();
+                    candidates = edit_converter(
+                        &mut ipc_service,
+                        &mut composition_id,
+                        &mut raw_input,
+                        |ipc| ipc.append_text(text.clone()),
+                    )?;
                     let hiragana = candidates.hiragana.clone();
                     let Some((text, sub_text, count)) =
                         candidate_parts(&candidates, selection_index)
@@ -805,8 +858,12 @@ impl TextServiceFactory {
                     }
                 }
                 ClientAction::RequestConversion => {
-                    let converted = ipc_service.request_conversion()?;
-                    raw_input = converted.input_text.clone();
+                    let converted = edit_converter(
+                        &mut ipc_service,
+                        &mut composition_id,
+                        &mut raw_input,
+                        |ipc| ipc.request_conversion(),
+                    )?;
                     if converted.texts.is_empty() {
                         continue;
                     }
@@ -870,13 +927,13 @@ impl TextServiceFactory {
                             corresponding_count: vec![0; predictions.texts.len()],
                             candidate_ids: predictions.prediction_ids,
                             is_converted: true,
-                            input_count: 0,
-                            input_text: String::new(),
+                            ..Candidates::default()
                         };
                         selection_index = 0;
                         preview.clear();
                         suffix.clear();
                         raw_input.clear();
+                        composition_id = None;
                         raw_hiragana.clear();
                         corresponding_count = 0;
                         should_learn_candidate = false;
@@ -929,8 +986,7 @@ impl TextServiceFactory {
                             corresponding_count: vec![0; predictions.texts.len()],
                             candidate_ids: predictions.prediction_ids,
                             is_converted: true,
-                            input_count: 0,
-                            input_text: String::new(),
+                            ..Candidates::default()
                         };
                         selection_index = 0;
                         ipc_service.set_candidates(candidates.texts.clone())?;
@@ -941,6 +997,7 @@ impl TextServiceFactory {
                     preview.clear();
                     suffix.clear();
                     raw_input.clear();
+                    composition_id = None;
                     raw_hiragana.clear();
                     corresponding_count = 0;
                     should_learn_candidate = false;
@@ -952,6 +1009,7 @@ impl TextServiceFactory {
                     preview.clear();
                     suffix.clear();
                     raw_input.clear();
+                    composition_id = None;
                     raw_hiragana.clear();
                     corresponding_count = 0;
                     should_learn_candidate = false;
@@ -995,6 +1053,7 @@ impl TextServiceFactory {
                         is_converted: true,
                         input_count: count,
                         input_text: raw_input.clone(),
+                        composition_id: candidates.composition_id,
                     };
                     selection_index = 0;
                     corresponding_count = count;
@@ -1007,10 +1066,15 @@ impl TextServiceFactory {
                     ipc_service.show_window()?;
                 }
                 ClientAction::RemoveText => {
-                    candidates = ipc_service.remove_text()?;
                     // The converter may rewrite romaji it keeps into kana
-                    // ("sha" -> "し"): only its input says what remains.
-                    raw_input = candidates.input_text.clone();
+                    // ("sha" -> "し"): only its input says what remains, and
+                    // edit_converter takes raw_input from it.
+                    candidates = edit_converter(
+                        &mut ipc_service,
+                        &mut composition_id,
+                        &mut raw_input,
+                        |ipc| ipc.remove_text(),
+                    )?;
                     let hiragana = candidates.hiragana.clone();
 
                     // The visible candidate can have a different character count
@@ -1025,6 +1089,7 @@ impl TextServiceFactory {
                         preview.clear();
                         suffix.clear();
                         raw_input.clear();
+                        composition_id = None;
                         raw_hiragana.clear();
                         candidates = Candidates::default();
                         should_learn_candidate = false;
@@ -1093,6 +1158,7 @@ impl TextServiceFactory {
                     preview.clear();
                     suffix.clear();
                     raw_input.clear();
+                    composition_id = None;
                     raw_hiragana.clear();
                     should_learn_candidate = false;
                     ipc_service.clear_text()?;
@@ -1141,7 +1207,12 @@ impl TextServiceFactory {
                     }
                 }
                 ClientAction::ShrinkText(text) => {
-                    let shrunk = ipc_service.shrink_text(corresponding_count)?;
+                    let shrunk = edit_converter(
+                        &mut ipc_service,
+                        &mut composition_id,
+                        &mut raw_input,
+                        |ipc| ipc.shrink_text(corresponding_count),
+                    )?;
                     let text = match mode {
                         InputMode::Kana => to_fullwidth(text),
                         InputMode::Latin => text.to_string(),
@@ -1149,9 +1220,13 @@ impl TextServiceFactory {
                     candidates = if text.is_empty() {
                         shrunk
                     } else {
-                        ipc_service.append_text(text)?
+                        edit_converter(
+                            &mut ipc_service,
+                            &mut composition_id,
+                            &mut raw_input,
+                            |ipc| ipc.append_text(text.clone()),
+                        )?
                     };
-                    raw_input = candidates.input_text.clone();
                     selection_index = 0;
 
                     let hiragana = candidates.hiragana.clone();
@@ -1223,6 +1298,7 @@ impl TextServiceFactory {
         composition.state = transition;
         composition.selection_index = selection_index;
         composition.raw_input = raw_input.clone();
+        composition.composition_id = composition_id;
         composition.raw_hiragana = raw_hiragana.clone();
         composition.candidates = candidates;
         composition.should_learn_candidate = should_learn_candidate;
@@ -1237,9 +1313,9 @@ impl TextServiceFactory {
 #[cfg(test)]
 mod tests {
     use super::{
-        candidate_is_learnable, candidate_parts, conversion_key_action, is_alt_backquote_key,
-        magic_result_is_current, next_selection_index, pending_magic_request, view_after_remove,
-        Composition, CompositionState, MagicRequest,
+        candidate_is_learnable, candidate_parts, conversion_key_action, converter_lost_composition,
+        is_alt_backquote_key, magic_result_is_current, next_selection_index, pending_magic_request,
+        view_after_remove, Composition, CompositionState, MagicRequest,
     };
     use crate::engine::{
         client_action::{ClientAction, SetSelectionType},
@@ -1313,6 +1389,7 @@ mod tests {
             is_converted: false,
             input_count: 2,
             input_text: "kana".to_string(),
+            composition_id: 1,
         };
         assert!(!candidate_is_learnable(&raw, 0));
 
@@ -1338,6 +1415,7 @@ mod tests {
             is_converted: false,
             input_count: 4,
             input_text: "kyou".to_string(),
+            composition_id: 1,
         };
 
         let view = view_after_remove(&after_remove);
@@ -1428,5 +1506,18 @@ mod tests {
 
         // a key that does nothing (e.g. Left while composing) keeps waiting
         assert_eq!(pending_magic_request(&waiting, &[]), waiting);
+    }
+
+    #[test]
+    fn composition_is_replayed_only_when_the_converter_changed_it() {
+        let response = Candidates {
+            composition_id: 7,
+            ..Candidates::default()
+        };
+        // the first edit of a composition adopts the converter's id
+        assert!(!converter_lost_composition(None, &response));
+        assert!(!converter_lost_composition(Some(7), &response));
+        // server restart, or another connection took the converter over
+        assert!(converter_lost_composition(Some(6), &response));
     }
 }

@@ -31,11 +31,9 @@ impl<'a> Visit for StringVisitor<'a> {
     }
 }
 
+/// Writes a Chrome trace of this process. DllMain starts it in debug
+/// builds only.
 pub fn setup_logger() -> anyhow::Result<()> {
-    #[cfg(not(debug_assertions))]
-    {
-        return Ok(());
-    }
     // Every process loading the text service writes its own trace; the
     // process id keeps two started in the same millisecond apart.
     let folder = log_folder();

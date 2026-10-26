@@ -19,11 +19,7 @@ use windows::{
             BOOL, CLASS_E_CLASSNOTAVAILABLE, E_NOINTERFACE, E_POINTER, FALSE, HMODULE, S_FALSE,
             TRUE,
         },
-        System::{
-            Com::IClassFactory,
-            Ole::SELFREG_E_CLASS,
-            SystemServices::{DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH},
-        },
+        System::{Com::IClassFactory, Ole::SELFREG_E_CLASS, SystemServices::DLL_PROCESS_ATTACH},
     },
 };
 // -- Dll Export Functions --
@@ -45,25 +41,25 @@ pub extern "system" fn DllMain(
             Ok(())
         })();
 
-        // use unwrap only in this function
-        std::thread::spawn(|| {
-            trace::setup_logger().unwrap();
-        });
+        // Debug builds only. The logger opens a file and installs the global
+        // subscriber, which must not happen under the loader lock, so a
+        // thread does it once DllMain has returned. Failing to start that
+        // thread only means there is no log; thread::spawn would panic here
+        // instead, and a panic cannot leave DllMain.
+        if cfg!(debug_assertions) {
+            let _ = std::thread::Builder::new().spawn(|| {
+                let _ = trace::setup_logger();
+            });
+        }
 
         tracing::debug!("DllMain");
 
         check_err!(result, TRUE, FALSE)
-    } else if fdw_reason == DLL_PROCESS_DETACH {
-        tracing::debug!("DLL_PROCESS_DETACH");
-
-        let result: anyhow::Result<()> = (|| {
-            let mut dll_instance = DllModule::get()?;
-            dll_instance.hinst = None;
-            Ok(())
-        })();
-
-        check_err!(result, TRUE, FALSE)
     } else {
+        // Nothing to undo on DLL_PROCESS_DETACH. At process termination the
+        // other threads are already gone and may have left any lock taken;
+        // on FreeLibrary (only regsvr32 does that, see DllCanUnloadNow) the
+        // process-wide state is simply discarded with the DLL.
         TRUE
     }
 }

@@ -4,12 +4,20 @@ use shared::AppConfig;
 use std::io::{BufRead, BufReader};
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 use std::{env, thread};
+use windows::core::w;
 use windows::Win32::{
-    Foundation::HANDLE,
-    System::Threading::{ABOVE_NORMAL_PRIORITY_CLASS, CREATE_NO_WINDOW},
+    Foundation::{GetLastError, ERROR_ALREADY_EXISTS, HANDLE},
+    System::Threading::{CreateMutexW, ABOVE_NORMAL_PRIORITY_CLASS, CREATE_NO_WINDOW},
 };
+
+/// A process that ran at least this long is considered to have worked, so
+/// the next restart starts again with the shortest delay.
+const STABLE_RUN: Duration = Duration::from_secs(60);
+const MAX_RESTART_DELAY: Duration = Duration::from_secs(60);
 
 fn file_on_search_path(filename: &str) -> bool {
     env::var("PATH")
@@ -30,6 +38,20 @@ fn select_backend_dir(configured: &str, cuda_available: bool, vulkan_available: 
 }
 
 fn main() -> anyhow::Result<()> {
+    // The launcher restarts the server and the UI whenever they exit. A
+    // second launcher in the same session would start copies that cannot
+    // get the pipes, exit and get restarted forever, so only one runs. The
+    // handle stays open until the process exits.
+    match unsafe { CreateMutexW(None, false, w!("Local\\Azookey.Launcher")) } {
+        Ok(_) if unsafe { GetLastError() } != ERROR_ALREADY_EXISTS => {}
+        // Access is denied when the other launcher runs at a higher integrity
+        // level; it exists either way.
+        _ => {
+            eprintln!("Another launcher is already running in this session");
+            return Ok(());
+        }
+    }
+
     let config = AppConfig::new();
 
     let exe_path = env::current_exe()?.parent().unwrap().to_path_buf();
@@ -46,18 +68,53 @@ fn main() -> anyhow::Result<()> {
     new_path = format!("{};{}", backend_path_str, new_path);
     env::set_var("PATH", &new_path);
 
-    let server_process = start_process(&exe_path, "azookey-server.exe", "[server]");
-    let ui_process = start_process(&exe_path, "ui.exe", "[ui]");
-
-    if let (Some(mut server), Some(mut ui)) = (server_process, ui_process) {
-        let server_handle = thread::spawn(move || server.wait());
-        let ui_handle = thread::spawn(move || ui.wait());
-
-        let _ = server_handle.join();
-        let _ = ui_handle.join();
+    let supervisors =
+        [("azookey-server.exe", "[server]"), ("ui.exe", "[ui]")].map(|(exe, prefix)| {
+            let base_dir = exe_path.clone();
+            thread::spawn(move || supervise(&base_dir, exe, prefix))
+        });
+    for supervisor in supervisors {
+        if supervisor.join().is_err() {
+            anyhow::bail!("a process supervisor panicked");
+        }
     }
-
     Ok(())
+}
+
+/// Keeps `exe` running: the converter or the candidate window can crash, and
+/// nothing else would start them again before the next logon. Restarts are
+/// delayed more and more while the process keeps failing quickly.
+fn supervise(base_dir: &Path, exe: &str, prefix: &str) {
+    let mut quick_failures = 0;
+    loop {
+        let started = Instant::now();
+        match start_process(base_dir, exe, prefix) {
+            Ok(mut child) => match child.wait() {
+                Ok(status) => eprintln!("{prefix}: exited with {status}"),
+                Err(error) => {
+                    eprintln!("{prefix}: cannot wait for the process: {error}");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            },
+            Err(error) => eprintln!("{prefix}: failed to start {exe}: {error}"),
+        }
+
+        if started.elapsed() >= STABLE_RUN {
+            quick_failures = 0;
+        }
+        let delay = restart_delay(quick_failures);
+        quick_failures += 1;
+        eprintln!("{prefix}: restarting in {} s", delay.as_secs());
+        thread::sleep(delay);
+    }
+}
+
+/// 1 s after the first quick failure, doubling up to [`MAX_RESTART_DELAY`].
+fn restart_delay(quick_failures: u32) -> Duration {
+    Duration::from_secs(1)
+        .checked_mul(1 << quick_failures.min(31))
+        .map_or(MAX_RESTART_DELAY, |delay| delay.min(MAX_RESTART_DELAY))
 }
 
 fn opt_out_of_power_throttling(child: &Child) {
@@ -66,15 +123,14 @@ fn opt_out_of_power_throttling(child: &Child) {
     }
 }
 
-fn start_process(base_dir: &std::path::Path, exe: &str, prefix: &str) -> Option<Child> {
+fn start_process(base_dir: &Path, exe: &str, prefix: &str) -> std::io::Result<Child> {
     let executable = base_dir.join(exe);
     let mut child = Command::new(&executable)
         .current_dir(base_dir)
         .creation_flags((CREATE_NO_WINDOW | ABOVE_NORMAL_PRIORITY_CLASS).0)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|error| panic!("Failed to start {}: {error}", executable.display()));
+        .spawn()?;
     opt_out_of_power_throttling(&child);
 
     let stdout = child.stdout.take().expect("Failed to capture stdout");
@@ -99,13 +155,22 @@ fn start_process(base_dir: &std::path::Path, exe: &str, prefix: &str) -> Option<
         }
     });
 
-    Some(child)
+    Ok(child)
 }
-
 
 #[cfg(test)]
 mod tests {
-    use super::select_backend_dir;
+    use super::{restart_delay, select_backend_dir, MAX_RESTART_DELAY};
+    use std::time::Duration;
+
+    #[test]
+    fn restart_delay_doubles_up_to_the_maximum() {
+        assert_eq!(restart_delay(0), Duration::from_secs(1));
+        assert_eq!(restart_delay(1), Duration::from_secs(2));
+        assert_eq!(restart_delay(5), Duration::from_secs(32));
+        assert_eq!(restart_delay(6), MAX_RESTART_DELAY);
+        assert_eq!(restart_delay(u32::MAX), MAX_RESTART_DELAY);
+    }
 
     #[test]
     fn vulkan_is_used_when_runtime_is_available() {

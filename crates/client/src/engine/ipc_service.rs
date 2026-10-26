@@ -74,6 +74,8 @@ pub struct Candidates {
     /// Number of input units (typed keys, or kana after the converter folded
     /// them) in the whole composition. ShrinkText counts in these units.
     pub input_count: i32,
+    /// The input units themselves, one character each.
+    pub input_text: String,
 }
 
 impl Candidates {
@@ -90,6 +92,7 @@ impl Candidates {
             candidate_ids: suggestions.iter().map(|s| s.candidate_id).collect(),
             is_converted: composing_text.is_converted,
             input_count: composing_text.input_count,
+            input_text: composing_text.input_text,
             hiragana: composing_text.hiragana,
         })
     }

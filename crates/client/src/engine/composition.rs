@@ -45,6 +45,7 @@ pub enum CompositionState {
 pub struct Composition {
     pub preview: String, // text to be previewed
     pub suffix: String,  // text to be appended after preview
+    // the converter's input units (ComposingText.input_text), for F9/F10
     pub raw_input: String,
     pub raw_hiragana: String,
 
@@ -763,14 +764,13 @@ impl TextServiceFactory {
                     }
                 }
                 ClientAction::AppendText(text) => {
-                    raw_input.push_str(&text);
-
                     let text = match mode {
                         InputMode::Kana => to_fullwidth(text),
                         InputMode::Latin => text.to_string(),
                     };
 
                     candidates = ipc_service.append_text(text.clone())?;
+                    raw_input = candidates.input_text.clone();
                     let hiragana = candidates.hiragana.clone();
                     let Some((text, sub_text, count)) =
                         candidate_parts(&candidates, selection_index)
@@ -806,6 +806,7 @@ impl TextServiceFactory {
                 }
                 ClientAction::RequestConversion => {
                     let converted = ipc_service.request_conversion()?;
+                    raw_input = converted.input_text.clone();
                     if converted.texts.is_empty() {
                         continue;
                     }
@@ -870,6 +871,7 @@ impl TextServiceFactory {
                             candidate_ids: predictions.prediction_ids,
                             is_converted: true,
                             input_count: 0,
+                            input_text: String::new(),
                         };
                         selection_index = 0;
                         preview.clear();
@@ -928,6 +930,7 @@ impl TextServiceFactory {
                             candidate_ids: predictions.prediction_ids,
                             is_converted: true,
                             input_count: 0,
+                            input_text: String::new(),
                         };
                         selection_index = 0;
                         ipc_service.set_candidates(candidates.texts.clone())?;
@@ -991,6 +994,7 @@ impl TextServiceFactory {
                         candidate_ids: vec![],
                         is_converted: true,
                         input_count: count,
+                        input_text: raw_input.clone(),
                     };
                     selection_index = 0;
                     corresponding_count = count;
@@ -1004,6 +1008,9 @@ impl TextServiceFactory {
                 }
                 ClientAction::RemoveText => {
                     candidates = ipc_service.remove_text()?;
+                    // The converter may rewrite romaji it keeps into kana
+                    // ("sha" -> "し"): only its input says what remains.
+                    raw_input = candidates.input_text.clone();
                     let hiragana = candidates.hiragana.clone();
 
                     // The visible candidate can have a different character count
@@ -1034,12 +1041,6 @@ impl TextServiceFactory {
                     selection_index = 0;
                     let view = view_after_remove(&candidates);
                     corresponding_count = view.corresponding_count;
-                    // Keep the romaji history aligned with the converter's input
-                    // units: ShrinkText later skips that many of them.
-                    raw_input = raw_input
-                        .chars()
-                        .take(candidates.input_count.max(0) as usize)
-                        .collect();
                     preview = view.text;
                     suffix = view.sub_text;
                     raw_hiragana = hiragana;
@@ -1140,13 +1141,6 @@ impl TextServiceFactory {
                     }
                 }
                 ClientAction::ShrinkText(text) => {
-                    // shrink text
-                    raw_input.push_str(&text);
-                    raw_input = raw_input
-                        .chars()
-                        .skip(corresponding_count as usize)
-                        .collect();
-
                     let shrunk = ipc_service.shrink_text(corresponding_count)?;
                     let text = match mode {
                         InputMode::Kana => to_fullwidth(text),
@@ -1157,6 +1151,7 @@ impl TextServiceFactory {
                     } else {
                         ipc_service.append_text(text)?
                     };
+                    raw_input = candidates.input_text.clone();
                     selection_index = 0;
 
                     let hiragana = candidates.hiragana.clone();
@@ -1203,7 +1198,9 @@ impl TextServiceFactory {
                         SetTextType::Hiragana => raw_hiragana.clone(),
                         SetTextType::Katakana => to_katakana(&raw_hiragana),
                         SetTextType::HalfKatakana => to_half_katakana(&raw_hiragana),
-                        SetTextType::FullLatin => to_fullwidth_latin(&raw_input),
+                        // the converter holds kana-mode symbols in their
+                        // Japanese form ("ー"); F9 shows the ASCII key's
+                        SetTextType::FullLatin => to_fullwidth_latin(&to_halfwidth(&raw_input)),
                         SetTextType::HalfLatin => to_halfwidth(&raw_input),
                     };
 
@@ -1315,6 +1312,7 @@ mod tests {
             candidate_ids: vec![-1],
             is_converted: false,
             input_count: 2,
+            input_text: "kana".to_string(),
         };
         assert!(!candidate_is_learnable(&raw, 0));
 
@@ -1339,6 +1337,7 @@ mod tests {
             candidate_ids: vec![-1],
             is_converted: false,
             input_count: 4,
+            input_text: "kyou".to_string(),
         };
 
         let view = view_after_remove(&after_remove);

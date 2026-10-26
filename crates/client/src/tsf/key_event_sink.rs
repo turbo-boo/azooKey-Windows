@@ -113,13 +113,19 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
             self.has_active_composition()?,
             ctrl_space_shortcut_enabled(wparam),
         ) {
+            // Cancelling deletes the composition's text. One left in the
+            // document that lost focus is committed instead: the shortcut
+            // is meant for the document it was typed in.
+            let action = match pic {
+                Some(context) if self.composition_elsewhere(context)? => {
+                    ClientAction::EndComposition
+                }
+                _ => ClientAction::CancelComposition,
+            };
             if let Some(context) = pic {
                 self.borrow_mut()?.context = Some(context.clone());
             }
-            self.handle_action(
-                &[ClientAction::CancelComposition],
-                CompositionState::None,
-            )?;
+            self.handle_action(&[action], CompositionState::None)?;
             // FALSE lets the application process Ctrl+A/C/V/etc.
             return Ok(false.into());
         }

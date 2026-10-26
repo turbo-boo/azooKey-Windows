@@ -1,5 +1,5 @@
 use windows::{
-    core::{implement, AsImpl, HRESULT, VARIANT},
+    core::{implement, AsImpl, IUnknown, Interface as _, HRESULT, VARIANT},
     Win32::{
         Foundation::{E_FAIL, HWND, POINT, RECT},
         UI::{
@@ -410,6 +410,22 @@ impl TextServiceFactory {
             }
             IfRefused::Skip => Ok(()),
         }
+    }
+
+    /// Whether the TSF composition belongs to another document than
+    /// `context`: a key arrived in a newly focused document before the old
+    /// document's composition could be ended.
+    pub fn composition_elsewhere(&self, context: &ITfContext) -> Result<bool> {
+        let composition = self.borrow()?.borrow_composition()?.tip_composition.clone();
+        let Some(composition) = composition else {
+            return Ok(false);
+        };
+        // an ended composition has no document; it is not elsewhere either
+        let Ok(document) = composition_context(&composition) else {
+            return Ok(false);
+        };
+        // COM identity is that of IUnknown
+        Ok(document.cast::<IUnknown>()? != context.cast::<IUnknown>()?)
     }
 
     /// The client id, the TSF composition and the display attribute atom.

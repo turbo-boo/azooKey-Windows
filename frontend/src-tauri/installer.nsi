@@ -761,7 +761,6 @@ Section Uninstall
   ${If} $0 <> 0
     DetailPrint "Azookey startup task was not present or could not be removed (exit code $0)"
   ${EndIf}
-  Delete "$APPDATA\Azookey\launch.vbs"
 
   !ifmacrodef NSIS_HOOK_PREUNINSTALL
     !insertmacro NSIS_HOOK_PREUNINSTALL

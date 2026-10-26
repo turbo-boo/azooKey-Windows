@@ -94,6 +94,36 @@ begin
     Result := 'Azookey can only be installed into ' + Expected + '.';
 end;
 
+// Older versions installed the settings app per user (%LOCALAPPDATA%\Azookey,
+// registered under HKCU). Its uninstaller can be replaced without elevation,
+// so it is run only as the original user, and not at all when that user's
+// token is elevated (Setup started from an elevated process). Runs before the
+// new per-machine copy is installed, which uses the same shortcut names.
+<event('PrepareToInstall')>
+function Azookey_RemovePerUserSettingsApp(var NeedsRestart: Boolean): String;
+var
+  Script: String;
+  ResultCode: Integer;
+begin
+  Result := '';
+  Script :=
+    '$p = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent()); ' +
+    'if ($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { exit 0 }; ' +
+    '$k = Get-ItemProperty -LiteralPath ''HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppName}'' -ErrorAction SilentlyContinue; ' +
+    'if ($k -and $k.UninstallString) { ' +
+    'Start-Process -FilePath $k.UninstallString.Trim([char]34) -ArgumentList ''/S'' -Wait }';
+  try
+    if not ExecAsOriginalUser(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+      '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' + Script + '"', '',
+      SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+      Log(Format('Failed to remove the per-user settings app: %s', [SysErrorMessage(ResultCode)]))
+    else if ResultCode <> 0 then
+      Log(Format('Removing the per-user settings app exited with code %d', [ResultCode]));
+  except
+    Log('Failed to remove the per-user settings app: ' + GetExceptionMessage);
+  end;
+end;
+
 #include "CodeDependencies.iss"
 
 [Code]
@@ -108,9 +138,11 @@ begin
   Dependency_AddVC2015To2022x86;
   // NSIS installers take /S for a silent install; the previous /q was not
   // recognised, so the settings app's installer wizard opened and Setup
-  // waited for it.
+  // waited for it. The settings app is installed per machine next to the IME
+  // (/D= must be the last parameter, unquoted); UninstallSettingsApp relies on
+  // that location.
   Dependency_Add('Azookey_0.1.0_x64-setup.exe',
-    '/S',
+    '/S /D=' + ExpandConstant('{#MyAppDir}'),
     'Azookey',
     '', '', True, False);
 
@@ -194,24 +226,28 @@ begin
   Task.Run(Unassigned);
 end;
 
-procedure UninstallAzookey();
+// Uninstalls the settings app, which the NSIS installer put into {app}. Never
+// run an uninstaller found through HKCU here: that value and a per-user
+// install are writable without elevation. _?= keeps the NSIS uninstaller from
+// copying itself to the user's TEMP directory and running from there; it then
+// cannot delete itself, so that is done here.
+procedure UninstallSettingsApp();
 var
-  UninstallString: string;
+  AppDir: String;
+  Uninstaller: String;
   ResultCode: Integer;
 begin
-  if RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\Azookey', 'UninstallString', UninstallString) then
-  begin
-    // The NSIS uninstaller of the settings app is interactive unless run
-    // with /S; hidden, its confirmation page would never be answered.
-    UninstallString := RemoveQuotes(UninstallString);
-    if UninstallString <> '' then
-    begin
-      if not Exec(UninstallString, '/S', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-        Log(Format('Failed to start the settings app uninstaller: %s', [SysErrorMessage(ResultCode)]))
-      else if ResultCode <> 0 then
-        Log(Format('Settings app uninstaller exited with code %d', [ResultCode]));
-    end;
-  end;
+  AppDir := RemoveBackslashUnlessRoot(ExpandConstant('{app}'));
+  Uninstaller := AppDir + '\uninstall.exe';
+  if not FileExists(Uninstaller) then
+    Exit;
+  // The NSIS uninstaller is interactive unless run with /S; hidden, its
+  // confirmation page would never be answered.
+  if not Exec(Uninstaller, '/S _?=' + AppDir, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Log(Format('Failed to start the settings app uninstaller: %s', [SysErrorMessage(ResultCode)]))
+  else if ResultCode <> 0 then
+    Log(Format('Settings app uninstaller exited with code %d', [ResultCode]));
+  DeleteFile(Uninstaller);
 end;
 
 // Stops the startup task and the launcher/server/UI processes started from Dir
@@ -345,9 +381,7 @@ begin
   begin
     // Release launcher/server/UI files before they are deleted.
     StopAzookeyProcesses(ExpandConstant('{app}'));
-  end;
-  if CurUninstallStep = usPostUninstall then
-  begin
-    UninstallAzookey();
+    // Remove the settings app's files before Uninstall removes {app}.
+    UninstallSettingsApp();
   end;
 end;

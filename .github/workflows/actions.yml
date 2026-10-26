@@ -82,6 +82,18 @@ jobs:
           throw "Legacy VBS startup path is still referenced by the installer"
         }
 
+        # The elevated uninstaller must not run anything found through HKCU,
+        # which non-elevated processes can change.
+        if ($installer -match "RegQueryStringValue\(HKCU") {
+          throw "The installer reads a value from HKCU"
+        }
+
+        # The settings app is installed per machine, like the IME.
+        $tauri = Get-Content "frontend/src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
+        if ($tauri.bundle.windows.nsis.installMode -ne "perMachine") {
+          throw "The settings app must be installed per machine"
+        }
+
         $nsis = Get-Content "frontend/src-tauri/installer.nsi" -Raw
         if ($nsis -notmatch 'schtasks\.exe" /Delete /TN "Azookey Startup" /F') {
           throw "Tauri uninstaller does not clean the startup task"

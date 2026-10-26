@@ -255,6 +255,63 @@ async fn check_converter(client: &mut AzookeyServiceClient<Channel>, keys: &str)
     Ok(())
 }
 
+/// Another connection, such as another application's IME or a sandboxed
+/// process, must neither see nor continue this connection's composition.
+async fn check_isolation(
+    owner: &mut AzookeyServiceClient<Channel>,
+    server_pipe: &str,
+) -> Result<()> {
+    let mut other = AzookeyServiceClient::new(wait_for(server_pipe, CALL_TIMEOUT).await?);
+    let mut samples = Vec::new();
+
+    timed(&mut samples, owner.clear_text(ClearTextRequest {})).await?;
+    let typed = timed(
+        &mut samples,
+        owner.append_text(AppendTextRequest {
+            text_to_append: "a".to_string(),
+        }),
+    )
+    .await?
+    .composing_text
+    .context("AppendText returned no composing text")?;
+
+    let seen = timed(
+        &mut samples,
+        other.move_cursor(MoveCursorRequest { offset: 0 }),
+    )
+    .await?
+    .composing_text
+    .context("MoveCursor returned no composing text")?;
+    ensure!(
+        seen.hiragana.is_empty() && seen.composition_id != typed.composition_id,
+        "another connection saw {:?} in composition {} (owner's: {})",
+        seen.hiragana,
+        seen.composition_id,
+        typed.composition_id
+    );
+
+    // The owner learns from the new composition_id that it has to replay.
+    let resumed = timed(
+        &mut samples,
+        owner.append_text(AppendTextRequest {
+            text_to_append: "i".to_string(),
+        }),
+    )
+    .await?
+    .composing_text
+    .context("AppendText returned no composing text")?;
+    ensure!(
+        resumed.hiragana == "い" && resumed.composition_id != typed.composition_id,
+        "after another connection took over, the owner continued {:?} in composition {} \
+         (expected い in a new composition)",
+        resumed.hiragana,
+        resumed.composition_id
+    );
+
+    timed(&mut samples, owner.clear_text(ClearTextRequest {})).await?;
+    Ok(())
+}
+
 /// Title of ui.exe's candidate window.
 const CANDIDATE_WINDOW: &str = "CandidateList";
 
@@ -367,10 +424,14 @@ async fn main() -> Result<()> {
     report("wakeup lateness (idle)", &idle.finish());
 
     let busy = wakeup_probe::WakeupProbe::start();
-    let converter = check_converter(&mut AzookeyServiceClient::new(server), &args.keys).await;
+    let mut converter_client = AzookeyServiceClient::new(server);
+    let converter = check_converter(&mut converter_client, &args.keys).await;
     report("wakeup lateness (converting)", &busy.finish());
     if let Err(error) = converter {
         failures.push(format!("converter: {error:#}"));
+    }
+    if let Err(error) = check_isolation(&mut converter_client, &server_pipe).await {
+        failures.push(format!("composition isolation: {error:#}"));
     }
     if let Err(error) = check_window(&mut WindowServiceClient::new(window), &ui_pipe).await {
         failures.push(format!("candidate window: {error:#}"));

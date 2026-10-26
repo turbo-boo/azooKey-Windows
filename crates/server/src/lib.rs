@@ -115,17 +115,20 @@ impl TonicNamedPipeServer {
                 loop {
                     server.connect().await?;
 
-                    let client = TonicNamedPipeServer {
-                        inner: server,
-                    };
-
-                    yield Ok(client);
-
+                    // Create the next instance before handing this one over:
+                    // once the connection is closed there would otherwise be
+                    // no instance left, and a client opening the pipe then
+                    // gets "not found" instead of ERROR_PIPE_BUSY.
+                    let connected = server;
                     server = ServerOptions::new()
                         .create_with_security_attributes_raw(
                             &name,
                             addr_of_mut!(security_attributes) as *mut c_void
                         )?;
+
+                    yield Ok(TonicNamedPipeServer {
+                        inner: connected,
+                    });
                 }
             })
         }

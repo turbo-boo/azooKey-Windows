@@ -1,7 +1,4 @@
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc, Mutex, MutexGuard, OnceLock,
-};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use anyhow::{Context, Result};
 
@@ -58,16 +55,12 @@ unsafe impl Send for DllModule {}
 
 #[derive(Debug)]
 pub struct DllModule {
-    pub ref_count: Arc<AtomicUsize>,
     pub hinst: Option<HMODULE>,
 }
 
 impl DllModule {
     pub fn new() -> Self {
-        Self {
-            ref_count: Arc::new(AtomicUsize::new(0)),
-            hinst: None,
-        }
+        Self { hinst: None }
     }
 
     pub fn get() -> Result<MutexGuard<'static, DllModule>> {
@@ -90,17 +83,5 @@ impl DllModule {
             String::from_utf16_lossy(&buffer[..length as usize])
         };
         Ok(path)
-    }
-
-    pub fn add_ref(&mut self) -> usize {
-        self.ref_count.fetch_add(1, Ordering::SeqCst)
-    }
-
-    pub fn release(&mut self) -> usize {
-        self.ref_count.fetch_sub(1, Ordering::SeqCst)
-    }
-
-    pub fn can_unload(&self) -> bool {
-        self.ref_count.load(Ordering::SeqCst) <= 0
     }
 }

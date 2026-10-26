@@ -18,8 +18,6 @@ use windows::{
 
 use anyhow::Result;
 
-use crate::globals::DllModule;
-
 use super::text_service::TextService;
 
 #[derive(Default)]
@@ -69,14 +67,9 @@ impl IClassFactory_Impl for TextServiceFactory_Impl {
     }
 
     #[macros::anyhow]
-    fn LockServer(&self, flock: BOOL) -> Result<()> {
-        let mut dll_instance = DllModule::get()?;
-        if flock.into() {
-            dll_instance.add_ref();
-        } else {
-            dll_instance.release();
-        }
-
+    fn LockServer(&self, _flock: BOOL) -> Result<()> {
+        // The DLL is never unloaded while the process runs (see
+        // DllCanUnloadNow), so there is nothing to keep loaded.
         Ok(())
     }
 }

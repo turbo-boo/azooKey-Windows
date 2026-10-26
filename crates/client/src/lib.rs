@@ -136,24 +136,10 @@ pub extern "system" fn DllUnregisterServer() -> HRESULT {
 
 #[no_mangle]
 pub extern "system" fn DllCanUnloadNow() -> HRESULT {
-    // let result: anyhow::Result<HRESULT> = (|| {
-    //     let dll_instance = DllModule::get()?;
-    //     if dll_instance.can_unload() {
-    //         Ok(S_OK)
-    //     } else {
-    //         Ok(S_FALSE)
-    //     }
-    // })();
-
-    // if let Ok(hr) = result {
-    //     hr
-    // } else {
-    //     E_FAIL
-    // }
-
-    // For now, always return S_FALSE
-    // This is a temporary solution until I implement the can_unload logic
-    // I need to check if all the COM objects are released
-
+    // The DLL stays loaded until the process exits. Counting COM objects
+    // would not make unloading safe: process-wide state outlives them,
+    // notably the server connection whose candidate-window dispatcher
+    // thread runs code from this DLL, the message window class and, in
+    // debug builds, the global tracing subscriber.
     S_FALSE
 }

@@ -1,9 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{
-    engine::state::IMEState,
-    globals::{DllModule, GUID_DISPLAY_ATTRIBUTE},
-};
+use crate::{engine::state::IMEState, globals::GUID_DISPLAY_ATTRIBUTE};
 
 use super::{factory::TextServiceFactory_Impl, message_window::MessageWindow};
 use windows::{
@@ -26,10 +23,6 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
     #[tracing::instrument(skip(self))]
     fn Activate(&self, ptim: Option<&ITfThreadMgr>, tid: u32) -> Result<()> {
         tracing::debug!("Activated with tid: {tid}");
-
-        // add reference to the dll instance to prevent it from being unloaded;
-        // the lock is released at once (MessageWindow::create takes it again)
-        DllModule::get()?.add_ref();
 
         // Connect eagerly when possible. If the server is not up yet (e.g. right
         // after logon), keep activating: IMEState::ipc_service() reconnects on
@@ -193,14 +186,6 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
         // destroys the window; results still in flight are dropped
         text_service.message_window = None;
         drop(text_service);
-
-        // remove reference to the dll instance
-        check(
-            "release dll reference",
-            DllModule::get().map(|mut dll_instance| {
-                dll_instance.release();
-            }),
-        );
 
         if failed {
             anyhow::bail!("Deactivate completed with errors");

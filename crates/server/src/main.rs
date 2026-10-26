@@ -513,5 +513,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .serve_with_incoming(TonicNamedPipeServer::new(shared::pipe::SERVER_PIPE)?)
         .await?;
 
-    Ok(())
+    // Serving only ends when the pipe listener failed (see
+    // TonicNamedPipeServer::new); exit non-zero so the launcher restarts us.
+    Err("the pipe listener stopped".into())
 }

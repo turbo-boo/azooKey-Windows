@@ -71,6 +71,11 @@ impl AsyncWrite for TonicNamedPipeServer {
 impl TonicNamedPipeServer {
     /// Serves the pipe [`shared::pipe::path`]`(base)` of the current user and
     /// session.
+    ///
+    /// Fails when the pipe already exists (another instance of the server
+    /// runs in this session). The stream ends after its first error, which
+    /// is also printed: tonic skips failed accepts and returns `Ok` when the
+    /// stream ends, so callers must treat the end of serving as fatal.
     pub fn new(base: &str) -> io::Result<impl Stream<Item = io::Result<TonicNamedPipeServer>>> {
         // Allow IPC from sandboxed processes (AppContainer / restricted tokens),
         // see https://nathancorvussolis.blogspot.com/2018/05/windows-ime-security.html
@@ -89,7 +94,6 @@ impl TonicNamedPipeServer {
         ));
 
         let mut security_descriptor = PSECURITY_DESCRIPTOR::default();
-
         unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 &sddl,
@@ -97,40 +101,50 @@ impl TonicNamedPipeServer {
                 &mut security_descriptor,
                 None,
             )?;
-
-            let mut security_attributes = UnsafeSecurityAttributes(SECURITY_ATTRIBUTES {
-                nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-                lpSecurityDescriptor: security_descriptor.0,
-                bInheritHandle: false.into(),
-            });
-
-            Ok(stream! {
-                let mut server = ServerOptions::new()
-                    .first_pipe_instance(true)
-                    .create_with_security_attributes_raw(
-                        &name,
-                        addr_of_mut!(security_attributes) as *mut c_void
-                    )?;
-
-                loop {
-                    server.connect().await?;
-
-                    // Create the next instance before handing this one over:
-                    // once the connection is closed there would otherwise be
-                    // no instance left, and a client opening the pipe then
-                    // gets "not found" instead of ERROR_PIPE_BUSY.
-                    let connected = server;
-                    server = ServerOptions::new()
-                        .create_with_security_attributes_raw(
-                            &name,
-                            addr_of_mut!(security_attributes) as *mut c_void
-                        )?;
-
-                    yield Ok(TonicNamedPipeServer {
-                        inner: connected,
-                    });
-                }
-            })
         }
+
+        let mut security_attributes = UnsafeSecurityAttributes(SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: security_descriptor.0,
+            bInheritHandle: false.into(),
+        });
+
+        let mut server = unsafe {
+            ServerOptions::new()
+                .first_pipe_instance(true)
+                .create_with_security_attributes_raw(
+                    &name,
+                    addr_of_mut!(security_attributes) as *mut c_void,
+                )?
+        };
+
+        Ok(stream! {
+            let error = loop {
+                if let Err(error) = server.connect().await {
+                    break error;
+                }
+
+                // Create the next instance before handing this one over:
+                // once the connection is closed there would otherwise be
+                // no instance left, and a client opening the pipe then
+                // gets "not found" instead of ERROR_PIPE_BUSY.
+                let connected = server;
+                server = match unsafe {
+                    ServerOptions::new().create_with_security_attributes_raw(
+                        &name,
+                        addr_of_mut!(security_attributes) as *mut c_void,
+                    )
+                } {
+                    Ok(next) => next,
+                    Err(error) => break error,
+                };
+
+                yield Ok(TonicNamedPipeServer {
+                    inner: connected,
+                });
+            };
+            eprintln!("{name}: the pipe listener failed: {error}");
+            yield Err(error);
+        })
     }
 }

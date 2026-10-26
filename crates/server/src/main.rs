@@ -1,5 +1,5 @@
 use azookey_server::presentation::{presentation, CompositionEdit, Presentation};
-use azookey_server::TonicNamedPipeServer;
+use azookey_server::{PipeConnectInfo, TonicNamedPipeServer};
 use tonic::{transport::Server, Request, Response, Status};
 use tonic_reflection::server::Builder as ReflectionBuilder;
 
@@ -34,6 +34,10 @@ static LEARNING_LOCK: OnceLock<PathBuf> = OnceLock::new();
 /// previous instance's identifiers.
 static COMPOSITION_ID: LazyLock<AtomicU64> =
     LazyLock::new(|| AtomicU64::new(RandomState::new().hash_one(std::process::id())));
+
+/// The connection (PipeConnectInfo::connection) whose composition the
+/// converter holds; 0 for none. See claim_composition.
+static COMPOSITION_OWNER: AtomicU64 = AtomicU64::new(0);
 
 struct RawComposingText {
     text: String,
@@ -192,6 +196,41 @@ fn clear_text() {
     }
     // the converter starts a new composition
     COMPOSITION_ID.fetch_add(1, Ordering::Relaxed);
+}
+
+fn caller<T>(request: &Request<T>) -> Result<&PipeConnectInfo, Status> {
+    request
+        .extensions()
+        .get::<PipeConnectInfo>()
+        .ok_or_else(|| Status::internal("the connection is not identified"))
+}
+
+/// Hands the converter's single composition to the caller before it reads or
+/// edits it. Every application's IME and sandboxed processes connect to
+/// this server, so a composition started by another connection is discarded
+/// first (new composition_id, no predictions, no context): the caller can
+/// neither read nor continue another application's input. The previous
+/// owner sees the new composition_id in its next response and replays its
+/// input.
+fn claim_composition<T>(request: &Request<T>) -> Result<(), Status> {
+    let connection = caller(request)?.connection();
+    if COMPOSITION_OWNER.swap(connection, Ordering::Relaxed) != connection {
+        clear_text();
+        clear_post_composition_predictions();
+        unsafe { SetContext(c"".as_ptr()) };
+    }
+    Ok(())
+}
+
+/// Settings and learning data belong to the user, not to sandboxed
+/// processes (AppContainer, low integrity) that may also open the pipe.
+fn require_medium_integrity<T>(request: &Request<T>) -> Result<(), Status> {
+    if caller(request)?.integrity() < shared::pipe::MEDIUM_INTEGRITY {
+        return Err(Status::permission_denied(
+            "the caller runs below medium integrity",
+        ));
+    }
+    Ok(())
 }
 
 fn get_composed_text(rich_candidates: bool) -> Vec<Suggestion> {
@@ -359,7 +398,8 @@ impl AzookeyService for MyAzookeyService {
         &self,
         request: Request<AppendTextRequest>,
     ) -> Result<Response<AppendTextResponse>, Status> {
-        let input = c_string(&request.into_inner().text_to_append)?;
+        let input = c_string(&request.get_ref().text_to_append)?;
+        claim_composition(&request)?;
         let composing_text = add_text(&input);
 
         Ok(Response::new(AppendTextResponse {
@@ -369,8 +409,9 @@ impl AzookeyService for MyAzookeyService {
 
     async fn remove_text(
         &self,
-        _: Request<RemoveTextRequest>,
+        request: Request<RemoveTextRequest>,
     ) -> Result<Response<RemoveTextResponse>, Status> {
+        claim_composition(&request)?;
         let composing_text = remove_text();
 
         Ok(Response::new(RemoveTextResponse {
@@ -382,6 +423,7 @@ impl AzookeyService for MyAzookeyService {
         &self,
         request: Request<MoveCursorRequest>,
     ) -> Result<Response<MoveCursorResponse>, Status> {
+        claim_composition(&request)?;
         let offset = request.into_inner().offset;
         let composing_text = move_cursor(offset);
 
@@ -392,8 +434,9 @@ impl AzookeyService for MyAzookeyService {
 
     async fn clear_text(
         &self,
-        _: Request<ClearTextRequest>,
+        request: Request<ClearTextRequest>,
     ) -> Result<Response<ClearTextResponse>, Status> {
+        claim_composition(&request)?;
         clear_text();
         Ok(Response::new(ClearTextResponse {}))
     }
@@ -402,11 +445,12 @@ impl AzookeyService for MyAzookeyService {
         &self,
         request: Request<ShrinkTextRequest>,
     ) -> Result<Response<ShrinkTextResponse>, Status> {
-        let offset = request.into_inner().offset;
+        let offset = request.get_ref().offset;
         // The converter traps on a negative count.
         if offset < 0 {
             return Err(Status::invalid_argument("offset must not be negative"));
         }
+        claim_composition(&request)?;
         let composing_text = shrink_text(offset);
 
         Ok(Response::new(ShrinkTextResponse {
@@ -419,8 +463,9 @@ impl AzookeyService for MyAzookeyService {
 
     async fn request_conversion(
         &self,
-        _: Request<RequestConversionRequest>,
+        request: Request<RequestConversionRequest>,
     ) -> Result<Response<RequestConversionResponse>, Status> {
+        claim_composition(&request)?;
         let composing_text = move_cursor(0);
         Ok(Response::new(RequestConversionResponse {
             composing_text: Some(composing_text_response(
@@ -434,7 +479,7 @@ impl AzookeyService for MyAzookeyService {
         &self,
         request: Request<shared::proto::SetContextRequest>,
     ) -> Result<Response<shared::proto::SetContextResponse>, Status> {
-        let context = request.into_inner().context;
+        let context = request.get_ref().context.as_str();
         let trimmed_context = context
             .split('\r')
             .filter(|s| !s.is_empty())
@@ -442,6 +487,8 @@ impl AzookeyService for MyAzookeyService {
             .unwrap_or_default();
 
         let context = c_string(trimmed_context)?;
+        // the context belongs to the composition about to start or going on
+        claim_composition(&request)?;
 
         unsafe { SetContext(context.as_ptr()) };
         Ok(Response::new(shared::proto::SetContextResponse {}))
@@ -449,8 +496,9 @@ impl AzookeyService for MyAzookeyService {
 
     async fn update_config(
         &self,
-        _: Request<shared::proto::UpdateConfigRequest>,
+        request: Request<shared::proto::UpdateConfigRequest>,
     ) -> Result<Response<shared::proto::UpdateConfigResponse>, Status> {
+        require_medium_integrity(&request)?;
         refresh_runtime_config();
         unsafe { LoadConfig() };
         Ok(Response::new(shared::proto::UpdateConfigResponse {}))
@@ -460,6 +508,7 @@ impl AzookeyService for MyAzookeyService {
         &self,
         request: Request<shared::proto::CommitCandidateRequest>,
     ) -> Result<Response<shared::proto::CommitCandidateResponse>, Status> {
+        claim_composition(&request)?;
         let candidate_id = request.into_inner().candidate_id;
         unsafe { CommitCandidate(candidate_id) };
         Ok(Response::new(shared::proto::CommitCandidateResponse {}))
@@ -475,8 +524,9 @@ impl AzookeyService for MyAzookeyService {
 
     async fn reset_learning(
         &self,
-        _: Request<shared::proto::ResetLearningRequest>,
+        request: Request<shared::proto::ResetLearningRequest>,
     ) -> Result<Response<shared::proto::ResetLearningResponse>, Status> {
+        require_medium_integrity(&request)?;
         with_learning_lock(|| unsafe { ResetLearning() })?;
         Ok(Response::new(shared::proto::ResetLearningResponse {}))
     }
@@ -494,8 +544,9 @@ impl AzookeyService for MyAzookeyService {
 
     async fn get_post_composition_predictions(
         &self,
-        _: Request<GetPostCompositionPredictionsRequest>,
+        request: Request<GetPostCompositionPredictionsRequest>,
     ) -> Result<Response<GetPostCompositionPredictionsResponse>, Status> {
+        claim_composition(&request)?;
         Ok(Response::new(GetPostCompositionPredictionsResponse {
             suggestions: get_post_composition_predictions(),
         }))
@@ -505,6 +556,7 @@ impl AzookeyService for MyAzookeyService {
         &self,
         request: Request<CommitPredictionRequest>,
     ) -> Result<Response<CommitPredictionResponse>, Status> {
+        claim_composition(&request)?;
         Ok(Response::new(CommitPredictionResponse {
             suggestions: commit_prediction(request.into_inner().prediction_id),
         }))
@@ -512,8 +564,9 @@ impl AzookeyService for MyAzookeyService {
 
     async fn clear_post_composition_predictions(
         &self,
-        _: Request<ClearPostCompositionPredictionsRequest>,
+        request: Request<ClearPostCompositionPredictionsRequest>,
     ) -> Result<Response<ClearPostCompositionPredictionsResponse>, Status> {
+        claim_composition(&request)?;
         clear_post_composition_predictions();
         Ok(Response::new(ClearPostCompositionPredictionsResponse {}))
     }

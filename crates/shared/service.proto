@@ -18,8 +18,9 @@ message ComposingText {
   // offsets count in these units.
   int32 input_count = 4;
   // Identifies the converter's composition. It changes whenever the converter
-  // starts over (ClearText, a server restart), so a client can tell that the
-  // text it is editing is no longer the converter's.
+  // starts over (ClearText, a server restart, or another connection taking
+  // the composition over), so a client can tell that the text it is editing
+  // is no longer the converter's.
   uint64 composition_id = 5;
   // The input units of the whole composition, one character each, as the
   // converter holds them after this edit (e.g. romaji keys, or kana the
@@ -125,6 +126,15 @@ message ClearPostCompositionPredictionsResponse {}
 
 
 // Service definition for text editing operations.
+//
+// The converter holds a single composition for all connections. AppendText,
+// RemoveText, ShrinkText, MoveCursor, ClearText, RequestConversion,
+// SetContext, CommitCandidate and the post-composition prediction RPCs act
+// on the composition of the calling connection: when another connection
+// made the last of these calls, the converter starts over first (new
+// composition_id, no predictions, no context). UpdateConfig and
+// ResetLearning fail with PERMISSION_DENIED for callers below medium
+// integrity (sandboxed processes).
 service AzookeyService {
   rpc AppendText (AppendTextRequest) returns (AppendTextResponse);
   rpc RemoveText (RemoveTextRequest) returns (RemoveTextResponse);

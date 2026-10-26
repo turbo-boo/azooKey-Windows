@@ -10,9 +10,10 @@ use windows::{
         Foundation::{LocalFree, HANDLE, HLOCAL},
         Security::{
             Authorization::{ConvertSidToStringSidW, GetSecurityInfo, SE_KERNEL_OBJECT},
-            EqualSid, GetTokenInformation, IsWellKnownSid, TokenUser, WinBuiltinAdministratorsSid,
-            WinLocalSystemSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY,
-            TOKEN_USER,
+            EqualSid, GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
+            IsWellKnownSid, TokenIntegrityLevel, TokenUser, WinBuiltinAdministratorsSid,
+            WinLocalSystemSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+            TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER,
         },
         Storage::FileSystem::{
             CreateFileW, FILE_FLAG_OVERLAPPED, FILE_READ_ATTRIBUTES, FILE_READ_DATA,
@@ -52,6 +53,38 @@ pub fn path(base: &str) -> io::Result<String> {
 /// SID string of the user running this process, for the servers' DACL.
 pub fn current_user_sid() -> io::Result<String> {
     ProcessUser::current()?.sid_string()
+}
+
+/// Mandatory integrity level (SECURITY_MANDATORY_MEDIUM_RID) of the user's
+/// ordinary programs. Sandboxes (AppContainer, low integrity, restricted
+/// tokens) run below it.
+pub const MEDIUM_INTEGRITY: u32 = 0x2000;
+
+/// Mandatory integrity level of `token` (opened with TOKEN_QUERY): the last
+/// subauthority of its integrity SID, comparable with [`MEDIUM_INTEGRITY`].
+pub fn token_integrity(token: HANDLE) -> io::Result<u32> {
+    unsafe {
+        let mut length = 0;
+        // fails with ERROR_INSUFFICIENT_BUFFER and reports the size
+        let _ = GetTokenInformation(token, TokenIntegrityLevel, None, 0, &mut length);
+        // u64 keeps the SID pointer inside TOKEN_MANDATORY_LABEL aligned
+        let mut buffer = vec![0u64; (length as usize).div_ceil(size_of::<u64>())];
+        GetTokenInformation(
+            token,
+            TokenIntegrityLevel,
+            Some(buffer.as_mut_ptr().cast()),
+            (buffer.len() * size_of::<u64>()) as u32,
+            &mut length,
+        )?;
+        let sid = (*buffer.as_ptr().cast::<TOKEN_MANDATORY_LABEL>()).Label.Sid;
+        match *GetSidSubAuthorityCount(sid) {
+            0 => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the integrity SID has no subauthority",
+            )),
+            count => Ok(*GetSidSubAuthority(sid, u32::from(count) - 1)),
+        }
+    }
 }
 
 /// Opens the client end of the pipe at `path` requesting only the rights in

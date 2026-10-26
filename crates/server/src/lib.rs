@@ -1,6 +1,15 @@
 use async_stream::stream;
 use futures_core::stream::Stream;
-use std::{ffi::c_void, pin::Pin, ptr::addr_of_mut};
+use std::{
+    ffi::c_void,
+    os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle},
+    pin::Pin,
+    ptr::addr_of_mut,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, OnceLock,
+    },
+};
 use tokio::{
     io::{self, AsyncRead, AsyncWrite},
     net::windows::named_pipe::{NamedPipeServer, ServerOptions},
@@ -8,9 +17,16 @@ use tokio::{
 use tonic::transport::server::Connected;
 use windows::{
     core::HSTRING,
-    Win32::Security::{
-        Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION},
-        PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+    Win32::{
+        Foundation::HANDLE,
+        Security::{
+            Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION},
+            RevertToSelf, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
+        },
+        System::{
+            Pipes::ImpersonateNamedPipeClient,
+            Threading::{GetCurrentThread, OpenThreadToken},
+        },
     },
 };
 
@@ -24,13 +40,70 @@ unsafe impl Sync for UnsafeSecurityAttributes {}
 
 pub struct TonicNamedPipeServer {
     inner: NamedPipeServer,
+    info: PipeConnectInfo,
+}
+
+/// Identifies the client of a pipe connection. tonic hands it to every
+/// request of the connection in the request extensions.
+#[derive(Debug, Clone)]
+pub struct PipeConnectInfo {
+    connection: u64,
+    integrity: Arc<OnceLock<u32>>,
+}
+
+impl PipeConnectInfo {
+    fn new() -> Self {
+        // 0 is never handed out, so it can stand for "no connection"
+        static NEXT_CONNECTION: AtomicU64 = AtomicU64::new(1);
+        Self {
+            connection: NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed),
+            integrity: Arc::default(),
+        }
+    }
+
+    /// Distinguishes this connection from every other connection of this
+    /// process; never 0.
+    pub fn connection(&self) -> u64 {
+        self.connection
+    }
+
+    /// The client's mandatory integrity level, comparable with
+    /// [`shared::pipe::MEDIUM_INTEGRITY`]. Taken from the client's token
+    /// when its first data arrives, so it is known by the time a request is
+    /// handled; 0 (untrusted) when it could not be determined.
+    pub fn integrity(&self) -> u32 {
+        self.integrity.get().copied().unwrap_or(0)
+    }
 }
 
 impl Connected for TonicNamedPipeServer {
-    type ConnectInfo = ();
+    type ConnectInfo = PipeConnectInfo;
 
     fn connect_info(&self) -> Self::ConnectInfo {
-        ()
+        self.info.clone()
+    }
+}
+
+/// Integrity level of the token the client opened `pipe` with.
+///
+/// The client's process ID cannot be trusted for this (another process can
+/// open the pipe and hand the handle over), so the client is impersonated.
+/// Clients open the pipe at identification level, which allows querying
+/// their token but not acting as them. Impersonation needs a message read
+/// from the pipe when the client tracks its context dynamically.
+fn client_integrity(pipe: &NamedPipeServer) -> io::Result<u32> {
+    unsafe {
+        ImpersonateNamedPipeClient(HANDLE(pipe.as_raw_handle()))?;
+        let mut token = HANDLE::default();
+        // as self: an identification-level token cannot open objects
+        let opened = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut token);
+        if RevertToSelf().is_err() {
+            // The thread would go on running as the client.
+            std::process::abort();
+        }
+        opened?;
+        let token = OwnedHandle::from_raw_handle(token.0);
+        shared::pipe::token_integrity(HANDLE(token.as_raw_handle()))
     }
 }
 
@@ -40,7 +113,16 @@ impl AsyncRead for TonicNamedPipeServer {
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_read(cx, buf)
+        let before = buf.filled().len();
+        let result = Pin::new(&mut self.inner).poll_read(cx, buf);
+        if buf.filled().len() > before && self.info.integrity.get().is_none() {
+            let integrity = client_integrity(&self.inner).unwrap_or_else(|error| {
+                eprintln!("cannot identify the pipe client: {error}");
+                0
+            });
+            let _ = self.info.integrity.set(integrity);
+        }
+        result
     }
 }
 
@@ -141,6 +223,7 @@ impl TonicNamedPipeServer {
 
                 yield Ok(TonicNamedPipeServer {
                     inner: connected,
+                    info: PipeConnectInfo::new(),
                 });
             };
             eprintln!("{name}: the pipe listener failed: {error}");

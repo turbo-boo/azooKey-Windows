@@ -49,9 +49,12 @@ fn get_config(state: tauri::State<AppState>) -> AppConfig {
 
 #[tauri::command]
 fn update_config(state: tauri::State<AppState>, new_config: AppConfig) -> Result<(), String> {
-    let mut config = state.settings.lock();
-    *config = new_config;
-    config.write();
+    // Save first: the cached settings must keep matching the file when the
+    // save fails.
+    new_config
+        .write()
+        .map_err(|error| format!("設定を保存できませんでした: {error}"))?;
+    *state.settings.lock() = new_config;
 
     // A server that is not running reads the saved file when it starts.
     let Ok(mut ipc) = state.ipc() else {

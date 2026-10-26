@@ -221,31 +221,22 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    pub fn write(&self) {
+    /// Saves the settings. Readers (IME, UI, server, settings app) may open
+    /// the file at any time, so a temporary file replaces the settings in one
+    /// step and nobody reads a half-written file.
+    pub fn write(&self) -> std::io::Result<()> {
         let config_root = get_config_root();
-        if let Err(error) = std::fs::create_dir_all(&config_root) {
-            eprintln!("Failed to create config directory: {error}");
-            return;
-        }
+        std::fs::create_dir_all(&config_root)?;
         let config_path = config_root.join(SETTINGS_FILENAME);
-        let Ok(config_str) = serde_json::to_string_pretty(self) else {
-            eprintln!("Failed to serialize settings");
-            return;
-        };
-        // Readers (IME, UI, server, settings app) may open the file at any
-        // time; write a temporary file and replace the settings in one step
-        // so nobody reads a half-written file.
+        let config_str = serde_json::to_string_pretty(self)?;
         let temp_path =
             config_root.join(format!("{SETTINGS_FILENAME}.{}.tmp", std::process::id()));
-        if let Err(error) = std::fs::write(&temp_path, config_str) {
-            eprintln!("Failed to write settings: {error}");
-            let _ = std::fs::remove_file(&temp_path);
-            return;
-        }
-        if let Err(error) = replace_file(&temp_path, &config_path) {
-            eprintln!("Failed to write settings: {error}");
+        let result = std::fs::write(&temp_path, config_str)
+            .and_then(|()| replace_file(&temp_path, &config_path));
+        if result.is_err() {
             let _ = std::fs::remove_file(&temp_path);
         }
+        result
     }
 
     pub fn read() -> Self {
@@ -271,7 +262,9 @@ impl AppConfig {
         // Create the file on first run only. Rewriting an existing file here
         // would replace settings that could not be read with the defaults.
         if !get_config_root().join(SETTINGS_FILENAME).exists() {
-            config.write();
+            if let Err(error) = config.write() {
+                eprintln!("Failed to create the settings file: {error}");
+            }
         }
         config
     }

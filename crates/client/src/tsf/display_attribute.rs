@@ -5,7 +5,7 @@ use std::{
 use windows::{
     core::{implement, BSTR, GUID},
     Win32::{
-        Foundation::S_FALSE,
+        Foundation::{E_INVALIDARG, S_FALSE},
         UI::TextServices::{
             IEnumTfDisplayAttributeInfo, IEnumTfDisplayAttributeInfo_Impl,
             ITfDisplayAttributeInfo, ITfDisplayAttributeInfo_Impl,
@@ -40,7 +40,8 @@ impl ITfDisplayAttributeProvider_Impl for TextServiceFactory_Impl {
                 return Ok(attribute.into());
             }
         }
-        anyhow::bail!("Display attribute not found");
+        // the documented result for a GUID this provider does not supply
+        Err(windows::core::Error::from(E_INVALIDARG).into())
     }
 }
 

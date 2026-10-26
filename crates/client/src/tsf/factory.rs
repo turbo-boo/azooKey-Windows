@@ -6,7 +6,7 @@ use std::{
 use windows::{
     core::{implement, IUnknown, Interface, GUID},
     Win32::{
-        Foundation::{BOOL, E_NOINTERFACE},
+        Foundation::{BOOL, CLASS_E_NOAGGREGATION, E_POINTER},
         System::Com::{IClassFactory, IClassFactory_Impl},
         UI::TextServices::{
             ITfCompositionSink, ITfDisplayAttributeProvider, ITfKeyEventSink, ITfLangBarItem,
@@ -49,36 +49,21 @@ impl IClassFactory_Impl for TextServiceFactory_Impl {
         riid: *const GUID,
         ppvobject: *mut *mut c_void,
     ) -> Result<()> {
-        let riid = unsafe { *riid };
-        let ppvobject = unsafe { &mut *ppvobject };
-
-        *ppvobject = std::ptr::null_mut();
+        if ppvobject.is_null() {
+            return Err(windows::core::Error::from(E_POINTER).into());
+        }
+        unsafe { *ppvobject = std::ptr::null_mut() };
 
         if punkouter.is_some() {
-            return Err(anyhow::Error::new(windows::core::Error::from_hresult(
-                E_NOINTERFACE,
-            )));
+            return Err(windows::core::Error::from(CLASS_E_NOAGGREGATION).into());
         }
 
-        unsafe {
-            *ppvobject = match riid {
-                ITfTextInputProcessor::IID => {
-                    std::mem::transmute::<ITfTextInputProcessor, *mut c_void>(
-                        TextServiceFactory::create::<ITfTextInputProcessor>()?,
-                    )
-                }
-                ITfTextInputProcessorEx::IID => {
-                    std::mem::transmute::<ITfTextInputProcessorEx, *mut c_void>(
-                        TextServiceFactory::create::<ITfTextInputProcessorEx>()?,
-                    )
-                }
-                _ => {
-                    return Err(anyhow::Error::new(windows::core::Error::from_hresult(
-                        E_NOINTERFACE,
-                    )))
-                }
-            };
-        }
+        // TSF creates the text input processor and, through the CLSID
+        // registered as GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER, a separate
+        // instance asked for ITfDisplayAttributeProvider. Hand out whatever
+        // the object implements; anything else is E_NOINTERFACE.
+        let object: IUnknown = TextServiceFactory::create()?;
+        unsafe { object.query(riid, ppvobject).ok()? };
 
         Ok(())
     }

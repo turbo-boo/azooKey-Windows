@@ -120,16 +120,26 @@ impl CategoryMgr {
         }
     }
 
+    /// Removes every category, also after one of them fails, and reports
+    /// the first failure.
     pub fn unregister() -> anyhow::Result<()> {
         unsafe {
             let catmgr: ITfCategoryMgr =
                 CoCreateInstance(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER)?;
 
+            let mut result = Ok(());
             for cat in Self::CATEGORIES.iter() {
-                catmgr.UnregisterCategory(&GUID_TEXT_SERVICE, cat, &GUID_TEXT_SERVICE)?;
+                if let Err(error) =
+                    catmgr.UnregisterCategory(&GUID_TEXT_SERVICE, cat, &GUID_TEXT_SERVICE)
+                {
+                    tracing::error!("UnregisterCategory {cat:?} failed: {error:?}");
+                    if result.is_ok() {
+                        result = Err(error.into());
+                    }
+                }
             }
 
-            Ok(())
+            result
         }
     }
 }

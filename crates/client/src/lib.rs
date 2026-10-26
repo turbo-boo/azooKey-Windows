@@ -113,6 +113,11 @@ pub extern "system" fn DllRegisterServer() -> HRESULT {
         Ok(())
     })();
 
+    if result.is_err() {
+        // do not leave a half-registered text service behind
+        let _ = unregister();
+    }
+
     // to show the error, SELFREG_E_CLASS is needed
     check_err!(result, SELFREG_E_CLASS)
 }
@@ -123,15 +128,30 @@ pub extern "system" fn DllUnregisterServer() -> HRESULT {
     // Called when the DLL is unregistered using regsvr32
     tracing::debug!("DllUnregisterServer");
 
-    let result: anyhow::Result<()> = (|| {
-        ProfileMgr::unregister()?;
-        CLSIDMgr::unregister()?;
-        CategoryMgr::unregister()?;
-
-        Ok(())
-    })();
-
+    let result = unregister();
     check_err!(result, SELFREG_E_CLASS)
+}
+
+/// Runs every unregistration step, also after one of them fails (e.g. the
+/// profile is already gone), and reports whether any failed.
+fn unregister() -> anyhow::Result<()> {
+    let steps = [
+        ("profile", ProfileMgr::unregister()),
+        ("CLSID", CLSIDMgr::unregister()),
+        ("categories", CategoryMgr::unregister()),
+    ];
+
+    let mut failed = false;
+    for (step, result) in steps {
+        if let Err(error) = result {
+            tracing::error!("Unregistering the {step} failed: {error:?}");
+            failed = true;
+        }
+    }
+    if failed {
+        anyhow::bail!("Unregistration completed with errors");
+    }
+    Ok(())
 }
 
 #[no_mangle]

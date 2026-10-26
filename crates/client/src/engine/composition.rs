@@ -196,10 +196,18 @@ fn converter_lost_composition(held: Option<u64>, response: &Candidates) -> bool 
     held.is_some_and(|held| held != response.composition_id)
 }
 
-/// Makes the converter hold exactly `raw_input` as a new composition.
-fn restore_converter(ipc_service: &mut IPCService, raw_input: &str) -> Result<()> {
+/// Makes the converter hold exactly `raw_input` as a new composition. When a
+/// connection takes the converter over, the server also forgets the text
+/// before the composition, so `resend_context` sends it again before the
+/// input is replayed. A new composition (no input yet) has just sent it.
+fn restore_converter(
+    ipc_service: &mut IPCService,
+    raw_input: &str,
+    resend_context: &mut impl FnMut(),
+) -> Result<()> {
     ipc_service.clear_text()?;
     if !raw_input.is_empty() {
+        resend_context();
         ipc_service.append_text(raw_input.to_string())?;
     }
     Ok(())
@@ -214,15 +222,16 @@ fn edit_converter(
     ipc_service: &mut IPCService,
     composition_id: &mut Option<u64>,
     raw_input: &mut String,
+    mut resend_context: impl FnMut(),
     mut edit: impl FnMut(&mut IPCService) -> Result<Candidates>,
 ) -> Result<Candidates> {
     if composition_id.is_none() {
-        restore_converter(ipc_service, raw_input)?;
+        restore_converter(ipc_service, raw_input, &mut resend_context)?;
     }
     let mut candidates = edit(ipc_service)?;
     if converter_lost_composition(*composition_id, &candidates) {
         tracing::warn!("The converter lost the composition; replaying its input");
-        restore_converter(ipc_service, raw_input)?;
+        restore_converter(ipc_service, raw_input, &mut resend_context)?;
         candidates = edit(ipc_service)?;
     }
     *composition_id = Some(candidates.composition_id);
@@ -771,6 +780,14 @@ impl TextServiceFactory {
         )
     }
 
+    /// Sends the converter the text before the composition again. The
+    /// document still shows `preview` and `suffix` before the caret.
+    fn resend_context(&self, preview: &str, suffix: &str) {
+        if let Err(error) = self.update_context(&format!("{preview}{suffix}")) {
+            tracing::warn!("Failed to send the text before the composition: {error:?}");
+        }
+    }
+
     #[tracing::instrument]
     pub fn handle_action(
         &self,
@@ -857,6 +874,7 @@ impl TextServiceFactory {
                             &mut ipc_service,
                             &mut composition_id,
                             &mut raw_input,
+                            || self.resend_context(&preview, &suffix),
                             |ipc| ipc.append_text(text.clone()),
                         )?;
                         let hiragana = candidates.hiragana.clone();
@@ -897,6 +915,7 @@ impl TextServiceFactory {
                             &mut ipc_service,
                             &mut composition_id,
                             &mut raw_input,
+                            || self.resend_context(&preview, &suffix),
                             |ipc| ipc.request_conversion(),
                         )?;
                         if converted.texts.is_empty() {
@@ -1108,6 +1127,7 @@ impl TextServiceFactory {
                             &mut ipc_service,
                             &mut composition_id,
                             &mut raw_input,
+                            || self.resend_context(&preview, &suffix),
                             |ipc| ipc.remove_text(),
                         )?;
                         let hiragana = candidates.hiragana.clone();
@@ -1247,6 +1267,7 @@ impl TextServiceFactory {
                             &mut ipc_service,
                             &mut composition_id,
                             &mut raw_input,
+                            || self.resend_context(&preview, &suffix),
                             |ipc| ipc.shrink_text(corresponding_count),
                         )?;
                         let text = match mode {
@@ -1260,6 +1281,7 @@ impl TextServiceFactory {
                                 &mut ipc_service,
                                 &mut composition_id,
                                 &mut raw_input,
+                                || self.resend_context(&preview, &suffix),
                                 |ipc| ipc.append_text(text.clone()),
                             )?
                         };

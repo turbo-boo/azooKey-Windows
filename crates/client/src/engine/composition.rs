@@ -275,8 +275,12 @@ fn edit_converter(
     Ok(candidates)
 }
 
-fn conversion_key_action(is_converted: bool) -> ClientAction {
-    if is_converted {
+/// What a key that steps into the candidates does: move to the next one in
+/// the list already on screen, or ask for conversion. A list is shown only
+/// for converted candidates; one without a second candidate has nowhere to
+/// move, and conversion may find more.
+fn conversion_key_action(candidates: &Candidates) -> ClientAction {
+    if candidates.is_converted && candidates.texts.len() > 1 {
         ClientAction::SetSelection(SetSelectionType::Down)
     } else {
         ClientAction::RequestConversion
@@ -542,10 +546,13 @@ impl TextServiceFactory {
                         CompositionState::Previewing,
                         vec![ClientAction::SetSelection(SetSelectionType::Up)],
                     ),
-                    // azooKey-Desktop: Down enters candidate selection like Space
+                    // Live conversion shows the candidates with the first one
+                    // selected, so Down moves to the second one in that list,
+                    // as Up already moves within it. Without a list to move
+                    // in, Down converts like Space.
                     Navigation::Down => (
                         CompositionState::Previewing,
-                        vec![ClientAction::RequestConversion],
+                        vec![conversion_key_action(&composition.candidates)],
                     ),
                 },
                 UserAction::ToggleInputMode => (
@@ -663,7 +670,7 @@ impl TextServiceFactory {
                 ),
                 UserAction::Space | UserAction::Tab => (
                     CompositionState::Previewing,
-                    vec![conversion_key_action(composition.candidates.is_converted)],
+                    vec![conversion_key_action(&composition.candidates)],
                 ),
                 UserAction::Function(key) => match key {
                     Function::Five => (
@@ -1551,14 +1558,36 @@ mod tests {
     use windows::Win32::Foundation::{LPARAM, WPARAM};
 
     #[test]
-    fn first_conversion_key_requests_candidates_when_live_conversion_is_off() {
+    fn conversion_key_moves_in_the_shown_list_or_converts() {
+        let shown = Candidates {
+            texts: vec!["本人".to_string(), "ほんにん".to_string()],
+            is_converted: true,
+            ..Candidates::default()
+        };
         assert_eq!(
-            conversion_key_action(false),
+            conversion_key_action(&shown),
+            ClientAction::SetSelection(SetSelectionType::Down)
+        );
+
+        // hiragana only (live conversion off, or after Backspace): no list
+        let hiragana = Candidates {
+            is_converted: false,
+            ..shown.clone()
+        };
+        assert_eq!(
+            conversion_key_action(&hiragana),
             ClientAction::RequestConversion
         );
+
+        // a single candidate has no next one; conversion may find more
+        let single = Candidates {
+            texts: vec!["本人".to_string()],
+            is_converted: true,
+            ..Candidates::default()
+        };
         assert_eq!(
-            conversion_key_action(true),
-            ClientAction::SetSelection(SetSelectionType::Down)
+            conversion_key_action(&single),
+            ClientAction::RequestConversion
         );
     }
 

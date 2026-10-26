@@ -249,22 +249,18 @@ begin
   end;
 end;
 
-// Removes the program files of an install in another directory. Always
-// unregisters the IME and deletes Azookey's own binaries by name. The
+// Removes the program files of an install in another directory by deleting
+// Azookey's own binaries by name. The IME is not unregistered with the old
+// DLLs: the old default directory is writable by the user, so regsvr32 would
+// load whatever DLL is there with administrator rights. Registering the new
+// DLLs (same CLSID, profile and categories) overwrites those entries. The
 // wildcard/subdirectory cleanup (Swift runtime DLLs, llama backends,
 // dictionaries) runs only for the old default %APPDATA%\Azookey, which belongs
 // to Azookey alone; a custom directory may contain other applications' files.
 // %APPDATA%\Azookey also holds settings.json and the learning memory, which
 // are kept.
 procedure RemoveLegacyInstall(Dir: String);
-var
-  ResultCode: Integer;
 begin
-  Exec(ExpandConstant('{sys}\regsvr32.exe'), '/u /s "' + Dir + '\azookey.dll"', '',
-    SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec(ExpandConstant('{syswow64}\regsvr32.exe'), '/u /s "' + Dir + '\azookey32.dll"', '',
-    SW_HIDE, ewWaitUntilTerminated, ResultCode);
-
   DeleteOrScheduleFile(Dir + '\azookey.dll');
   DeleteOrScheduleFile(Dir + '\azookey32.dll');
   DeleteOrScheduleFile(Dir + '\azookey_windows.dll');

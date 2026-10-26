@@ -15,7 +15,10 @@ use tsf::factory::TextServiceFactory;
 use windows::{
     core::{IUnknown, Interface as _, GUID, HRESULT},
     Win32::{
-        Foundation::{CLASS_E_CLASSNOTAVAILABLE, E_NOINTERFACE, E_POINTER, HMODULE, S_FALSE},
+        Foundation::{
+            BOOL, CLASS_E_CLASSNOTAVAILABLE, E_NOINTERFACE, E_POINTER, FALSE, HMODULE, S_FALSE,
+            TRUE,
+        },
         System::{
             Com::IClassFactory,
             Ole::SELFREG_E_CLASS,
@@ -31,7 +34,7 @@ pub extern "system" fn DllMain(
     hinst: HMODULE,
     fdw_reason: u32,
     _lpv_reserved: *mut c_void,
-) -> bool {
+) -> BOOL {
     if fdw_reason == DLL_PROCESS_ATTACH {
         let result: anyhow::Result<()> = (|| {
             let mut dll_instance = DllModule::new();
@@ -49,7 +52,7 @@ pub extern "system" fn DllMain(
 
         tracing::debug!("DllMain");
 
-        check_err!(result, true, false)
+        check_err!(result, TRUE, FALSE)
     } else if fdw_reason == DLL_PROCESS_DETACH {
         tracing::debug!("DLL_PROCESS_DETACH");
 
@@ -59,9 +62,9 @@ pub extern "system" fn DllMain(
             Ok(())
         })();
 
-        check_err!(result, true, false)
+        check_err!(result, TRUE, FALSE)
     } else {
-        return true;
+        TRUE
     }
 }
 

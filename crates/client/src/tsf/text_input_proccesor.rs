@@ -4,19 +4,38 @@ use crate::{engine::state::IMEState, globals::GUID_DISPLAY_ATTRIBUTE};
 
 use super::{factory::TextServiceFactory_Impl, message_window::MessageWindow};
 use windows::{
-    core::Interface as _,
+    core::{s, w, Interface as _, HRESULT},
     Win32::{
         Foundation::BOOL,
-        System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER},
+        System::LibraryLoader::{GetModuleHandleW, GetProcAddress},
         UI::TextServices::{
-            CLSID_TF_CategoryMgr, ITfCategoryMgr, ITfKeyEventSink, ITfKeystrokeMgr,
-            ITfLangBarItemButton, ITfLangBarItemMgr, ITfSource, ITfTextInputProcessorEx_Impl,
-            ITfTextInputProcessor_Impl, ITfThreadMgr, ITfThreadMgrEventSink,
+            ITfCategoryMgr, ITfKeyEventSink, ITfKeystrokeMgr, ITfLangBarItemButton,
+            ITfLangBarItemMgr, ITfSource, ITfTextInputProcessorEx_Impl, ITfTextInputProcessor_Impl,
+            ITfThreadMgr, ITfThreadMgrEventSink,
         },
     },
 };
 
 use anyhow::{Context, Result};
+
+/// The category manager, obtained without COM. The text service registers
+/// GUID_TFCAT_TIPCAP_COMLESS, so TSF may activate it in a thread that never
+/// initialized COM, where CoCreateInstance fails. msctf.dll, which is
+/// calling Activate, exports TF_CreateCategoryMgr for this case; the import
+/// libraries do not, so it is looked up at run time.
+fn category_mgr() -> Result<ITfCategoryMgr> {
+    type CreateCategoryMgr = unsafe extern "system" fn(*mut *mut std::ffi::c_void) -> HRESULT;
+    unsafe {
+        let msctf = GetModuleHandleW(w!("msctf.dll"))?;
+        let create = GetProcAddress(msctf, s!("TF_CreateCategoryMgr"))
+            .context("msctf.dll does not export TF_CreateCategoryMgr")?;
+        let create: CreateCategoryMgr = std::mem::transmute(create);
+        let mut category_mgr = std::ptr::null_mut();
+        create(&mut category_mgr).ok()?;
+        // the out pointer carries a reference, which from_raw takes over
+        Ok(ITfCategoryMgr::from_raw(category_mgr))
+    }
+}
 
 impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
     #[macros::anyhow]
@@ -78,10 +97,7 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
         tracing::debug!("Initialize display attribute");
         let atom_map = unsafe {
             let mut map = HashMap::new();
-            let category_mgr: ITfCategoryMgr =
-                CoCreateInstance(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER)?;
-
-            let atom = category_mgr.RegisterGUID(&GUID_DISPLAY_ATTRIBUTE)?;
+            let atom = category_mgr()?.RegisterGUID(&GUID_DISPLAY_ATTRIBUTE)?;
             map.insert(GUID_DISPLAY_ATTRIBUTE, atom);
             map
         };

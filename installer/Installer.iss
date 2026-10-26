@@ -60,7 +60,10 @@ Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 ; so replace/delete them on the next restart when they are in use.
 Source: "../build/azookey_windows.dll"; DestDir: "{app}"; DestName: "azookey.dll"; Flags: ignoreversion regserver restartreplace uninsrestartdelete 64bit
 Source: "../build/x86/azookey_windows.dll"; DestDir: "{app}"; DestName: "azookey32.dll"; Flags: ignoreversion regserver restartreplace uninsrestartdelete 32bit
-Source: "../build/*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; COM loads the IME DLLs with their own directory searched first, so the
+; runtime DLLs they import (vcruntime140.dll) are loaded from {app} into the
+; same apps and stay in use as well.
+Source: "../build/*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs restartreplace uninsrestartdelete
 Source: "{#SettingsAppSetupSource}"; Flags: dontcopy noencryption
 Source: "./Azookey Startup.xml"; Flags: dontcopy noencryption
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files

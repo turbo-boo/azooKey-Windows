@@ -27,10 +27,12 @@ impl StringExt for &str {
         self.encode_utf16().collect()
     }
 
+    /// UTF-16LE bytes with a two-byte NUL, as RegSetValueExW wants REG_SZ
+    /// data: its size must include the terminating null character.
     fn to_wide(&self) -> Vec<u8> {
         self.encode_utf16()
-            .flat_map(|c| c.to_le_bytes())
             .chain(Some(0))
+            .flat_map(|c| c.to_le_bytes())
             .collect()
     }
 }
@@ -131,5 +133,19 @@ pub trait VKeyExt {
 impl VKeyExt for VIRTUAL_KEY {
     fn is_pressed(self) -> bool {
         unsafe { GetKeyState(self.0 as i32) as u16 & 0x8000 != 0 }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StringExt as _;
+
+    #[test]
+    fn registry_string_ends_with_a_wide_nul() {
+        let bytes = "Apartment".to_wide();
+        assert_eq!(bytes.len(), ("Apartment".len() + 1) * 2);
+        assert_eq!(&bytes[bytes.len() - 2..], &[0, 0]);
+        assert_eq!(&bytes[..2], &[b'A', 0]);
+        assert_eq!("".to_wide(), vec![0, 0]);
     }
 }

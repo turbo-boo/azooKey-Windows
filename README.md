@@ -105,11 +105,11 @@ JSON、TSV、Microsoft IME形式のテキスト辞書をインポートできま
 
 ### 開発環境のセットアップ
 
-- [Rust](https://www.rust-lang.org/tools/install)
-- [Swift for Windows](https://www.swift.org/install/windows/) (Swift 6.0以上)
+- [Rust](https://www.rust-lang.org/tools/install) (1.89以上)
+- [Swift for Windows](https://www.swift.org/install/windows/) (Swift 6.3.3。CIと同じバージョンです。Swift 6.0系ではC++相互運用を含むビルドが現在のMSVC標準ライブラリに対応していません)
 - [protoc](https://protobuf.dev/installation/) 
 - [node.js](https://nodejs.org/en/download/)
-- [inno setup](https://jrsoftware.org/isinfo.php)
+- [inno setup](https://jrsoftware.org/isinfo.php) (6.4以上)
 
 ### ビルド
 

@@ -394,6 +394,14 @@ struct UserDictionaryExport {
     entries: Vec<UserDictionaryEntry>,
 }
 
+/// Whether `text` contains a tab, line break or other control character.
+/// Such entries cannot be written to the TSV/TXT dictionary format, whose
+/// fields are separated by tabs and entries by line breaks, so they are not
+/// valid dictionary entries.
+fn has_control_character(text: &str) -> bool {
+    text.contains(char::is_control)
+}
+
 pub fn normalize_dictionary_entries(
     entries: impl IntoIterator<Item = UserDictionaryEntry>,
 ) -> Vec<UserDictionaryEntry> {
@@ -405,7 +413,11 @@ pub fn normalize_dictionary_entries(
                 reading: entry.reading.trim().to_string(),
                 word: entry.word.trim().to_string(),
             };
-            if normalized.reading.is_empty() || normalized.word.is_empty() {
+            if normalized.reading.is_empty()
+                || normalized.word.is_empty()
+                || has_control_character(&normalized.reading)
+                || has_control_character(&normalized.word)
+            {
                 return None;
             }
             if seen.insert(normalized.clone()) {
@@ -431,6 +443,14 @@ pub fn parse_user_dictionary(
                 .map_err(|error| format!("JSONの解析に失敗しました: {error}"))?
                 .entries
         };
+        if let Some(entry) = entries.iter().find(|entry| {
+            has_control_character(entry.reading.trim()) || has_control_character(entry.word.trim())
+        }) {
+            return Err(format!(
+                "タブや改行を含むエントリは登録できません: {}",
+                entry.reading.trim().escape_debug()
+            ));
+        }
         let entries = normalize_dictionary_entries(entries);
         if entries.is_empty() {
             return Err("有効な辞書エントリがありません".to_string());
@@ -850,6 +870,33 @@ mod tests {
     #[test]
     fn malformed_json_dictionary_is_rejected() {
         assert!(parse_user_dictionary("{not-json}", Some("json")).is_err());
+    }
+
+    #[test]
+    fn every_accepted_entry_survives_a_text_export_round_trip() {
+        let entries = vec![
+            UserDictionaryEntry { reading: "あずーきー".into(), word: "azooKey".into() },
+            UserDictionaryEntry { reading: "てすと".into(), word: "a\tb".into() },
+            UserDictionaryEntry { reading: "かいぎょう".into(), word: "a\r\nb".into() },
+            UserDictionaryEntry { reading: "えもじ".into(), word: "😀 と 空白".into() },
+        ];
+        let accepted = normalize_dictionary_entries(entries);
+        assert_eq!(accepted.len(), 2);
+
+        let tsv = export_user_dictionary_tsv(&accepted);
+        assert_eq!(parse_user_dictionary(&tsv, Some("tsv")).unwrap(), accepted);
+        let txt = decode_dictionary_bytes(&export_user_dictionary_tsv_utf16le(&accepted)).unwrap();
+        assert_eq!(parse_user_dictionary(&txt, Some("txt")).unwrap(), accepted);
+    }
+
+    #[test]
+    fn json_dictionary_with_tabs_or_line_breaks_is_rejected() {
+        assert!(parse_user_dictionary(
+            r#"{"version":1,"entries":[{"reading":"あ","word":"a\tb"}]}"#,
+            Some("json"),
+        )
+        .is_err());
+        assert!(parse_user_dictionary(r#"[{"reading":"あ\nい","word":"亜"}]"#, None).is_err());
     }
 
     #[test]

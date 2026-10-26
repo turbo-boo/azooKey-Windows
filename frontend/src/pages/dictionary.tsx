@@ -70,6 +70,12 @@ export const Dictionary = () => {
             toast("読みと単語の両方を入力してください");
             return;
         }
+        // The TSV/TXT export cannot hold tabs or line breaks, so the backend
+        // drops entries containing control characters (Unicode Cc).
+        if (/\p{Cc}/u.test(normalizedReading + normalizedWord)) {
+            toast("読みと単語には、タブや改行などの制御文字を使えません");
+            return;
+        }
 
         const result = await addEntries([
             { reading: normalizedReading, word: normalizedWord },

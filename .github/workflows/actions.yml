@@ -160,6 +160,15 @@ jobs:
     - name: Build
       run: cargo make build --release
 
+    - name: Verify the Swift resource bundles are packaged
+      shell: pwsh
+      run: |
+        # EfficientNGram loads its tokenizer from this bundle next to
+        # azookey-server.exe; without it, enabling personalization crashes
+        # the server.
+        $tokenizer = "build/AzooKeyKanakanjiConverter_EfficientNGram.resources/tokenizer/tokenizer.json"
+        if (-not (Test-Path $tokenizer)) { throw "$tokenizer is missing" }
+
     - name: Verify launcher has no console subsystem
       shell: pwsh
       run: |

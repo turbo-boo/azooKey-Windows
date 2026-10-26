@@ -59,6 +59,9 @@ cp target/$str/launcher.exe build
 cp target/i686-pc-windows-msvc/$str/azookey_windows.dll build/x86
 
 cp server-swift/.build/x86_64-unknown-windows-msvc/release/azookey-server.dll build
+# Swift resource bundles (e.g. the EfficientNGram tokenizer) are loaded
+# from <Package>_<Target>.resources next to the executable.
+cp -Recurse -Force server-swift/.build/x86_64-unknown-windows-msvc/release/*.resources build
 
 cp -Recurse -Force llama_cpu build
 cp -Recurse -Force llama_cuda build

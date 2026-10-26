@@ -21,8 +21,12 @@ use windows::{
             SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, SYNCHRONIZE,
         },
         System::{
+            Pipes::{GetNamedPipeServerProcessId, GetNamedPipeServerSessionId},
             RemoteDesktop::ProcessIdToSessionId,
-            Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcessToken},
+            Threading::{
+                GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken,
+                PROCESS_QUERY_LIMITED_INFORMATION,
+            },
         },
     },
 };
@@ -93,7 +97,8 @@ pub fn token_integrity(token: HANDLE) -> io::Result<u32> {
 ///
 /// The pipe name is predictable, so another user could create it first. The
 /// connection is refused unless the pipe is owned by this user, SYSTEM or
-/// Administrators (the owner of a server started elevated).
+/// Administrators (the owner of a server started elevated), and unless the
+/// server passes [`check_server`].
 pub fn open_client(path: &str) -> io::Result<NamedPipeClient> {
     let access = FILE_READ_DATA
         | FILE_WRITE_DATA
@@ -126,6 +131,7 @@ pub fn open_client(path: &str) -> io::Result<NamedPipeClient> {
     let handle = unsafe { OwnedHandle::from_raw_handle(handle.0) };
 
     check_owner(HANDLE(handle.as_raw_handle()))?;
+    check_server(HANDLE(handle.as_raw_handle()))?;
 
     unsafe { NamedPipeClient::from_raw_handle(handle.into_raw_handle()) }
 }
@@ -161,6 +167,60 @@ fn check_owner(pipe: HANDLE) -> io::Result<()> {
                 "the pipe belongs to another user",
             ))
         }
+    }
+}
+
+/// Any process of this user, a sandboxed one at low integrity included, can
+/// create the pipe while the server is not running, and the owner check
+/// cannot tell it from the server. It would receive what every application
+/// types, elevated ones included, and answer with its own candidates. So the
+/// server must run in this session at medium integrity or above.
+///
+/// Sandboxed clients (AppContainer, restricted tokens) are usually not
+/// allowed to open the server's process and cannot tell the server from a
+/// sandboxed impostor at all. Refusing them would break input in every
+/// sandboxed application, so for them a server that cannot be inspected is
+/// accepted; one that can be inspected must still be at medium integrity.
+fn check_server(pipe: HANDLE) -> io::Result<()> {
+    let refuse = |reason: &str| Err(io::Error::new(io::ErrorKind::PermissionDenied, reason));
+
+    let mut server_session = 0;
+    let mut session = 0;
+    unsafe {
+        GetNamedPipeServerSessionId(pipe, &mut server_session)?;
+        ProcessIdToSessionId(GetCurrentProcessId(), &mut session)?;
+    }
+    if server_session != session {
+        return refuse("the pipe is served from another session");
+    }
+
+    match server_integrity(pipe) {
+        Ok(integrity) if integrity >= MEDIUM_INTEGRITY => Ok(()),
+        Ok(_) => refuse("the pipe is served by a sandboxed process"),
+        Err(_) if current_integrity()? < MEDIUM_INTEGRITY => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn server_integrity(pipe: HANDLE) -> io::Result<u32> {
+    unsafe {
+        let mut process_id = 0;
+        GetNamedPipeServerProcessId(pipe, &mut process_id)?;
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id)?;
+        let process = OwnedHandle::from_raw_handle(process.0);
+        let mut token = HANDLE::default();
+        OpenProcessToken(HANDLE(process.as_raw_handle()), TOKEN_QUERY, &mut token)?;
+        let token = OwnedHandle::from_raw_handle(token.0);
+        token_integrity(HANDLE(token.as_raw_handle()))
+    }
+}
+
+fn current_integrity() -> io::Result<u32> {
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)?;
+        let token = OwnedHandle::from_raw_handle(token.0);
+        token_integrity(HANDLE(token.as_raw_handle()))
     }
 }
 

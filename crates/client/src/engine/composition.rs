@@ -18,6 +18,7 @@ use super::{
     user_action::{consume_translation, Function, Navigation},
 };
 use shared::AppConfig;
+use windows::core::{IUnknown, Interface as _};
 use windows::Win32::{
     Foundation::{LPARAM, WPARAM},
     UI::{
@@ -152,24 +153,60 @@ impl ITfCompositionSink_Impl for TextServiceFactory_Impl {
 
         // TSF already ended the composition and lends its write cookie here;
         // a new edit session cannot be requested from inside this one. Clear
-        // the marking with the given cookie and forget the composition so
-        // EndComposition below only resets the engine state.
-        {
-            let text_service = self.borrow()?;
-            if let Some(composition) = pcomposition {
-                let context = text_service.context::<ITfContext>()?;
-                unsafe {
-                    let range = composition.GetRange()?;
-                    context.GetProperty(&GUID_PROP_ATTRIBUTE)?.Clear(ecwrite, &range)?;
-                }
+        // the marking through the composition's own document: the text
+        // service's context follows the last key and can be another one.
+        if let Some(composition) = pcomposition {
+            let cleared = unsafe {
+                composition.GetRange().and_then(|range| {
+                    range
+                        .GetContext()?
+                        .GetProperty(&GUID_PROP_ATTRIBUTE)?
+                        .Clear(ecwrite, &range)
+                })
+            };
+            if let Err(error) = cleared {
+                tracing::warn!("Failed to clear the terminated composition's marking: {error:?}");
             }
-            text_service.borrow_mut_composition()?.tip_composition = None;
         }
 
-        let actions = vec![ClientAction::EndComposition];
-        self.handle_action(&actions, CompositionState::None)?;
+        // The composition is gone whatever happened above: forget it and
+        // reset the engine, which needs neither the document nor the server.
+        {
+            let text_service = self.borrow()?;
+            let mut current = text_service.borrow_mut_composition()?;
+            let ours = match (current.tip_composition.as_ref(), pcomposition) {
+                (Some(tip), Some(terminated)) => same_composition(tip, terminated),
+                // already let go of; reset only an engine left composing
+                (None, Some(_)) => current.lost_tip_composition(),
+                (_, None) => true,
+            };
+            if !ours {
+                // not the composition the engine is editing
+                return Ok(());
+            }
+            current.tip_composition = None;
+            current.reset();
+        }
+
+        // Only the stored connection: connecting here could stall the
+        // application, and without one there is nothing to clean up.
+        let ipc_service = IMEState::get().ok().and_then(|state| state.ipc_service.clone());
+        if let Some(mut ipc_service) = ipc_service {
+            release_ended_composition(&mut ipc_service);
+        }
 
         Ok(())
+    }
+}
+
+/// Whether `a` and `b` are the same composition object. Interface pointers
+/// identify a COM object only through IUnknown; if that cannot be queried,
+/// they are taken to be the same, so a terminated composition is never left
+/// behind as the current one.
+fn same_composition(a: &ITfComposition, b: &ITfComposition) -> bool {
+    match (a.cast::<IUnknown>(), b.cast::<IUnknown>()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => true,
     }
 }
 

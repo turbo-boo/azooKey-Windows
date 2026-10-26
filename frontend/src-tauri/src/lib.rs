@@ -53,7 +53,9 @@ fn lock_settings(app: &AppHandle) -> Result<File, String> {
 }
 
 fn load_settings() -> Result<AppConfig, String> {
-    AppConfig::load().map_err(|error| format!("設定を読み込めませんでした: {error}"))
+    AppConfig::load().map_err(|error| {
+        format!("設定ファイル（%APPDATA%\\Azookey\\settings.json）を読み込めませんでした: {error}")
+    })
 }
 
 /// Applies `change` to the current settings file, saves it and tells the

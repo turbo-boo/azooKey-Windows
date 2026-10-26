@@ -65,8 +65,8 @@ export const General = () => {
                 setPredictionEnabled(data.prediction?.enabled ?? false);
                 showMagic(data);
             })
-            .catch(() => {
-                toast("設定の読み込みに失敗しました");
+            .catch((error) => {
+                toast("設定の読み込みに失敗しました", { description: String(error) });
             });
     }, []);
 
@@ -74,16 +74,16 @@ export const General = () => {
         try {
             await updateConfig({ learning: { mode } });
             setLearningMode(mode);
-        } catch {
-            toast("学習設定の更新に失敗しました");
+        } catch (error) {
+            toast("学習設定の更新に失敗しました", { description: String(error) });
         }
     };
 
     const updateGeneralConfig = async (patch: Record<string, unknown>) => {
         try {
             return await updateConfig(patch);
-        } catch {
-            toast("設定の更新に失敗しました");
+        } catch (error) {
+            toast("設定の更新に失敗しました", { description: String(error) });
             return null;
         }
     };
@@ -139,8 +139,8 @@ export const General = () => {
         try {
             await invoke("reset_learning");
             toast("学習履歴をリセットしました");
-        } catch {
-            toast("学習履歴のリセットに失敗しました");
+        } catch (error) {
+            toast("学習履歴のリセットに失敗しました", { description: String(error) });
         }
     };
 

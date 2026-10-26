@@ -35,7 +35,9 @@ export const Dictionary = () => {
                     );
                 }
             })
-            .catch(() => toast("ユーザー辞書の読み込みに失敗しました"));
+            .catch((error) =>
+                toast("ユーザー辞書の読み込みに失敗しました", { description: String(error) }),
+            );
     }, []);
 
     // The changes are applied to the dictionary as it is in the settings file
@@ -45,8 +47,8 @@ export const Dictionary = () => {
         setSaving(true);
         try {
             return await change();
-        } catch {
-            toast("ユーザー辞書の更新に失敗しました");
+        } catch (error) {
+            toast("ユーザー辞書の更新に失敗しました", { description: String(error) });
             return null;
         } finally {
             setSaving(false);

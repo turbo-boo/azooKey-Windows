@@ -5,6 +5,7 @@ import { SidebarProvider } from "@/components/ui/sidebar"
 import { ThemeProvider } from "@/components/theme-provider"
 import { BrowserRouter, Routes, Route } from "react-router";
 import { AppSidebar } from "@/components/app-sidebar"
+import { ConfigGate } from "@/components/config-gate"
 
 import { General } from "@/pages/general"
 import { Appearance } from "@/pages/appearance"
@@ -21,10 +22,10 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
         <main className="w-full p-6">
           <ThemeProvider defaultTheme="system" storageKey="vite-ui-theme">
             <Routes>
-              <Route path="/" element={<General />} />
-              <Route path="/appearance" element={<Appearance />} />
-              <Route path="/zenzai" element={<Zenzai />} />
-              <Route path="/dictionary" element={<Dictionary />} />
+              <Route path="/" element={<ConfigGate><General /></ConfigGate>} />
+              <Route path="/appearance" element={<ConfigGate><Appearance /></ConfigGate>} />
+              <Route path="/zenzai" element={<ConfigGate><Zenzai /></ConfigGate>} />
+              <Route path="/dictionary" element={<ConfigGate><Dictionary /></ConfigGate>} />
               <Route path="/about" element={<About />} />
             </Routes>
             <Toaster />

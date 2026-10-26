@@ -84,8 +84,8 @@ export const Zenzai = () => {
                     alpha: data.personalization?.alpha ?? 0.5,
                 });
             })
-            .catch(() => {
-                // Keep default values if config fetch fails
+            .catch((error) => {
+                toast("設定の読み込みに失敗しました", { description: String(error) });
             });
 
         invoke("check_capability").then((capability: any) => {
@@ -101,7 +101,7 @@ export const Zenzai = () => {
         try {
             return await saveConfig(patch);
         } catch (error) {
-            toast("設定の更新に失敗しました");
+            toast("設定の更新に失敗しました", { description: String(error) });
             return null;
         }
     };

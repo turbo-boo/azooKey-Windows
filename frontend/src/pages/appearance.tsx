@@ -59,7 +59,9 @@ export const Appearance = () => {
     useEffect(() => {
         loadConfig()
             .then(showTheme)
-            .catch(() => toast("テーマ設定を読み込めませんでした"));
+            .catch((error) =>
+                toast("テーマ設定を読み込めませんでした", { description: String(error) }),
+            );
     }, []);
 
     const saveTheme = async () => {
@@ -67,8 +69,8 @@ export const Appearance = () => {
         try {
             showTheme(await updateConfig({ theme: changedFields(loadedTheme, theme) }));
             toast("テーマを保存しました");
-        } catch {
-            toast("テーマの保存に失敗しました");
+        } catch (error) {
+            toast("テーマの保存に失敗しました", { description: String(error) });
         } finally {
             setSaving(false);
         }

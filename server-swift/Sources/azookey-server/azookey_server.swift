@@ -203,6 +203,9 @@ func candidateDisplayText(_ candidate: Candidate) -> String {
                 }
 
                 applyUserDictionary(json)
+                // The converter reuses the lattice of an unchanged input,
+                // which was looked up in the previous dictionary.
+                converter.stopComposition()
             }
         } catch {
             print("Failed to read settings: \(error)")
@@ -308,6 +311,8 @@ func candidateDisplayText(_ candidate: Candidate) -> String {
 @MainActor public func clear_text() {
     composingText = ComposingText()
     lastCandidates = []
+    // Otherwise typing the same input again reuses the old lattice.
+    converter.stopComposition()
 }
 
 @_silgen_name("CommitCandidate")
@@ -342,6 +347,8 @@ func candidateDisplayText(_ candidate: Candidate) -> String {
     converter.sendToDicdataStore(
         .setRequestOptions(getOptions(shouldResetMemory: true))
     )
+    // the cached lattice still carries the learned values
+    converter.stopComposition()
 }
 
 @_silgen_name("GetPostCompositionPredictions")

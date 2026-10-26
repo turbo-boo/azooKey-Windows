@@ -14,7 +14,7 @@ use tao::{
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tonic::transport::Server;
-use uiaccess::prepare_uiaccess_token;
+use uiaccess::run_with_uiaccess;
 use utils::get_candidate_window_position;
 use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE,
@@ -47,14 +47,19 @@ fn webview_data_directory() -> std::path::PathBuf {
         .join("WebView2")
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     // Without UIAccess the windows still work for normal applications; they
     // just cannot be shown above elevated or immersive ones.
-    if let Err(error) = prepare_uiaccess_token() {
-        eprintln!("Running without UIAccess: {error:#}");
+    match run_with_uiaccess() {
+        Ok(Some(exit_code)) => std::process::exit(exit_code as i32),
+        Ok(None) => {}
+        Err(error) => eprintln!("Running without UIAccess: {error:#}"),
     }
+    run()
+}
 
+#[tokio::main]
+async fn run() -> anyhow::Result<()> {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event()
         .with_any_thread(true)
         .build();

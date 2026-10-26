@@ -21,10 +21,16 @@ use windows::{
                 TH32CS_SNAPPROCESS,
             },
             Environment::GetCommandLineW,
+            JobObjects::{
+                AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+                SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            },
             SystemServices::PRIVILEGE_SET_ALL_NECESSARY,
             Threading::{
-                CreateProcessAsUserW, ExitProcess, GetCurrentProcess, GetStartupInfoW, OpenProcess,
-                OpenProcessToken, SetThreadToken, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
+                CreateProcessAsUserW, GetCurrentProcess, GetExitCodeProcess, GetStartupInfoW,
+                OpenProcess, OpenProcessToken, ResumeThread, SetThreadToken, TerminateProcess,
+                WaitForSingleObject, CREATE_SUSPENDED, INFINITE, PROCESS_INFORMATION,
                 PROCESS_QUERY_LIMITED_INFORMATION, STARTUPINFOW,
             },
         },
@@ -245,24 +251,44 @@ pub fn create_uiaccess_token() -> Result<HANDLE> {
     }
 }
 
-/// Restarts ui.exe with UIAccess, so the candidate window can be shown above
-/// elevated and immersive windows. Returns when this process should run the
-/// UI itself: it already has UIAccess, or the relaunch is not possible (a
-/// standard user cannot borrow winlogon's privilege); an error tells why the
-/// UI runs without UIAccess.
-pub fn prepare_uiaccess_token() -> Result<()> {
+/// Set in the environment of the relaunched copy, so that a copy that
+/// somehow did not get UIAccess runs the UI instead of relaunching again.
+const RELAUNCHED_VARIABLE: &str = "AZOOKEY_UI_UIACCESS_RELAUNCH";
+
+/// Runs ui.exe with UIAccess, so the candidate window can be shown above
+/// elevated and immersive windows.
+///
+/// Returns `Ok(None)` when this process has UIAccess and should run the UI.
+/// Otherwise this process starts a copy of itself with UIAccess, waits for it
+/// and returns `Ok(Some(exit_code))` of the copy, which this process should
+/// exit with: the launcher only knows this process, so it must live as long
+/// as the real UI and report how it ended. The copy is in a job that is
+/// closed with this process, so it does not outlive it either.
+///
+/// An error means the relaunch is not possible (a standard user cannot
+/// borrow winlogon's privilege) and this process should run the UI without
+/// UIAccess.
+pub fn run_with_uiaccess() -> Result<Option<u32>> {
     if check_for_ui_access()? {
         println!("UIAccess is already enabled");
-        return Ok(());
+        return Ok(None);
     }
+    anyhow::ensure!(
+        std::env::var_os(RELAUNCHED_VARIABLE).is_none(),
+        "the relaunched process did not get UIAccess"
+    );
 
     let token_handle = create_uiaccess_token()?;
+    let job = kill_on_close_job()
+        .inspect_err(|error| eprintln!("The UIAccess process may outlive this one: {error}"))
+        .ok();
 
     let mut startup_info = STARTUPINFOW::default();
     let mut process_info = PROCESS_INFORMATION::default();
     // CreateProcessAsUserW may write to the command line buffer.
     let mut command_line = unsafe { GetCommandLineW().as_wide() }.to_vec();
     command_line.push(0);
+    std::env::set_var(RELAUNCHED_VARIABLE, "1");
 
     unsafe {
         GetStartupInfoW(&mut startup_info);
@@ -273,18 +299,57 @@ pub fn prepare_uiaccess_token() -> Result<()> {
             None,
             None,
             false,
-            PROCESS_CREATION_FLAGS::default(),
+            CREATE_SUSPENDED,
             None,
             None,
             &startup_info,
             &mut process_info,
         );
         let _ = CloseHandle(token_handle);
+        std::env::remove_var(RELAUNCHED_VARIABLE);
         created?;
 
-        println!("Process created with UIAccess token");
-        let _ = CloseHandle(process_info.hProcess);
+        if let Some(job) = job {
+            if let Err(error) = AssignProcessToJobObject(job, process_info.hProcess) {
+                eprintln!("The UIAccess process may outlive this one: {error}");
+            }
+        }
+        if ResumeThread(process_info.hThread) == u32::MAX {
+            let error = windows::core::Error::from_win32();
+            let _ = TerminateProcess(process_info.hProcess, 1);
+            let _ = CloseHandle(process_info.hThread);
+            let _ = CloseHandle(process_info.hProcess);
+            return Err(error.into());
+        }
         let _ = CloseHandle(process_info.hThread);
-        ExitProcess(0);
+        println!("Process created with UIAccess token");
+
+        WaitForSingleObject(process_info.hProcess, INFINITE);
+        let mut exit_code = 1;
+        if let Err(error) = GetExitCodeProcess(process_info.hProcess, &mut exit_code) {
+            eprintln!("Cannot read the exit code of the UIAccess process: {error}");
+        }
+        let _ = CloseHandle(process_info.hProcess);
+        // The job handle stays open until this process exits.
+        Ok(Some(exit_code))
+    }
+}
+
+/// A job that terminates its processes when its last handle is closed.
+fn kill_on_close_job() -> windows::core::Result<HANDLE> {
+    unsafe {
+        let job = CreateJobObjectW(None, None)?;
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if let Err(error) = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &limits as *const _ as *const c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        ) {
+            let _ = CloseHandle(job);
+            return Err(error);
+        }
+        Ok(job)
     }
 }

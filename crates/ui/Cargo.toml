@@ -18,6 +18,10 @@ base64 = "0.22"
 [dependencies.windows]
 version = "0.58.0"
 features = [
+    "Win32_Security",
     "Win32_System_Diagnostics_ToolHelp",
-    "Win32_System_Environment"
+    "Win32_System_Environment",
+    "Win32_System_JobObjects",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
 ]

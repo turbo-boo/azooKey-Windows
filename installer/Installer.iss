@@ -324,7 +324,9 @@ end;
 
 // Stops the startup task and the launcher/server/UI processes started from Dir
 // so their files can be replaced or deleted. Matches on the executable path
-// because the image names (ui.exe, launcher.exe) are generic.
+// because the image names (ui.exe, launcher.exe) are generic. The launcher
+// restarts the server and the UI whenever they exit, so it is stopped (and
+// waited for) first.
 procedure StopAzookeyProcesses(Dir: String);
 var
   PsDir: String;
@@ -336,9 +338,14 @@ begin
 
   PsDir := RemoveBackslashUnlessRoot(Dir);
   StringChangeEx(PsDir, '''', '''''', True);
-  Script := 'Get-Process -Name launcher,azookey-server,ui -ErrorAction SilentlyContinue | ' +
-    'Where-Object { $_.Path -and $_.Path.StartsWith(''' + PsDir + '\'', [StringComparison]::OrdinalIgnoreCase) } | ' +
-    'Stop-Process -Force';
+  Script := '$dir = ''' + PsDir + '\''; ' +
+    '$stop = { param($names) ' +
+    '$p = @(Get-Process -Name $names -ErrorAction SilentlyContinue | ' +
+    'Where-Object { $_.Path -and $_.Path.StartsWith($dir, [StringComparison]::OrdinalIgnoreCase) }); ' +
+    '$p | Stop-Process -Force; ' +
+    '$p | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue }; ' +
+    '& $stop launcher; ' +
+    '& $stop azookey-server,ui';
   Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
     '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' + Script + '"', '',
     SW_HIDE, ewWaitUntilTerminated, ResultCode);

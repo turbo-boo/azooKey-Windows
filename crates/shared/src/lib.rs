@@ -543,12 +543,21 @@ pub fn validate_tuner_directory(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// `host` is the host as written in the URL (`Url::host_str`), so an IPv6
+/// address comes in brackets: `[::1]`.
 pub fn validate_magic_endpoint_parts(scheme: &str, host: Option<&str>) -> Result<(), String> {
     match scheme {
         "https" => Ok(()),
         "http" => {
             let host = host.unwrap_or_default();
-            if host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1" {
+            let ip_address = host
+                .strip_prefix('[')
+                .and_then(|host| host.strip_suffix(']'))
+                .unwrap_or(host)
+                .parse::<std::net::IpAddr>();
+            if host.eq_ignore_ascii_case("localhost")
+                || ip_address.is_ok_and(|address| address.is_loopback())
+            {
                 Ok(())
             } else {
                 Err("HTTPはlocalhostのAPIにだけ使用できます。外部APIにはHTTPSを使用してください".to_string())
@@ -614,6 +623,11 @@ mod tests {
         assert!(validate_magic_endpoint_parts("http", Some("::1")).is_ok());
         assert!(validate_magic_endpoint_parts("http", Some("example.com")).is_err());
         assert!(validate_magic_endpoint_parts("ftp", Some("localhost")).is_err());
+        assert!(validate_magic_endpoint_parts("http", Some("[::1]")).is_ok());
+        assert!(validate_magic_endpoint_parts("http", Some("[2001:db8::1]")).is_err());
+        assert!(validate_magic_endpoint_parts("http", Some("[::1")).is_err());
+        assert!(validate_magic_endpoint_parts("http", Some("127.0.0.1.example.com")).is_err());
+        assert!(validate_magic_endpoint_parts("http", None).is_err());
     }
 
     #[test]

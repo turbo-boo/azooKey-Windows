@@ -3,6 +3,11 @@
 
 import PackageDescription
 
+// The converter's modules are built with C++ interop (SwiftyMarisa wraps
+// marisa-trie), and Swift refuses to import such a module into a compilation
+// that does not enable it as well.
+let swiftSettings: [SwiftSetting] = [.interoperabilityMode(.Cxx)]
+
 let package = Package(
     name: "azookey-server",
     products: [
@@ -15,9 +20,9 @@ let package = Package(
         .library(name: "ffi", targets: ["azookey-server"])
     ],
     dependencies: [
-        // Dependencies declare other packages that this package depends on.
-        // .package(url: /* package url */, from: "1.0.0"),
-        .package(url: "https://github.com/azookey/AzooKeyKanaKanjiConverter", branch: "7d5dd99")
+        // Vendored so EfficientNGram (personalization) is real on Windows;
+        // see AzooKeyKanaKanjiConverter/Package.swift.
+        .package(path: "AzooKeyKanaKanjiConverter")
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -28,14 +33,23 @@ let package = Package(
             dependencies: [
                 .product(name: "KanaKanjiConverterModule", package: "azookeykanakanjiconverter"),
                 "ffi"
-            ]
+            ],
+            swiftSettings: swiftSettings
         ),
         .testTarget(
             name: "azookey-serverTests",
             dependencies: [
                 "azookey-server",
                 .product(name: "KanaKanjiConverterModule", package: "azookeykanakanjiconverter")
-            ]
+            ],
+            swiftSettings: swiftSettings
+        ),
+        .testTarget(
+            name: "PersonalizationModelTests",
+            dependencies: [
+                .product(name: "EfficientNGram", package: "azookeykanakanjiconverter")
+            ],
+            swiftSettings: swiftSettings
         ),
     ]
 )

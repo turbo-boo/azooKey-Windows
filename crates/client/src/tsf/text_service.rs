@@ -82,8 +82,10 @@ pub struct TextService {
     pub this: Option<ITfTextInputProcessor>,
     // TSF activates one text service per UI thread, so sink registrations
     // belong to the instance, not to process-wide state.
+    pub key_event_sink_advised: bool,
     pub thread_mgr_sink_cookie: Option<u32>,
     pub layout_sink: Option<(ITfContext, u32)>,
+    pub lang_bar_item_added: bool,
     // brings results of background work back to this thread
     pub message_window: Option<MessageWindow>,
 }

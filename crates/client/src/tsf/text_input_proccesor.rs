@@ -43,6 +43,63 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
     fn Activate(&self, ptim: Option<&ITfThreadMgr>, tid: u32) -> Result<()> {
         tracing::debug!("Activated with tid: {tid}");
 
+        let result = self.activate(ptim, tid);
+        if let Err(error) = &result {
+            // TSF does not call Deactivate after a failed Activate, so undo
+            // what was registered; otherwise the sinks stay advised and the
+            // self-reference keeps this object alive.
+            tracing::error!("Activate failed, undoing it: {error:?}");
+            if let Err(error) = self.release_registrations() {
+                tracing::error!("Undoing the failed activation: {error:?}");
+            }
+        } else {
+            tracing::debug!("Activate success");
+        }
+        result
+    }
+
+    #[macros::anyhow]
+    #[tracing::instrument(skip(self))]
+    fn Deactivate(&self) -> Result<()> {
+        tracing::debug!("Deactivated");
+
+        // Every registration must be removed even if an earlier step fails,
+        // e.g. when the server has already exited.
+        let mut failed = false;
+        let mut check = |step: &str, result: Result<()>| {
+            if let Err(error) = result {
+                tracing::error!("Deactivate: {step} failed: {error:?}");
+                failed = true;
+            }
+        };
+
+        check("end composition", self.end_composition_on_deactivate());
+
+        // persist learning memory when the text service is deactivated
+        check(
+            "flush learning",
+            (|| {
+                let ipc_service = IMEState::get()?.ipc_service.clone();
+                if let Some(mut ipc_service) = ipc_service {
+                    ipc_service.flush_learning()?;
+                }
+                Ok(())
+            })(),
+        );
+
+        check("remove registrations", self.release_registrations());
+
+        if failed {
+            anyhow::bail!("Deactivate completed with errors");
+        }
+        tracing::debug!("Deactivate success");
+
+        Ok(())
+    }
+}
+
+impl TextServiceFactory_Impl {
+    fn activate(&self, ptim: Option<&ITfThreadMgr>, tid: u32) -> Result<()> {
         // Connect eagerly when possible. If the server is not up yet (e.g. right
         // after logon), keep activating: IMEState::ipc_service() reconnects on
         // the next key, and keys pass through to the app until then.
@@ -75,6 +132,7 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
                 BOOL::from(true),
             )?;
         };
+        text_service.key_event_sink_advised = true;
 
         // initialize thread manager event sink
         tracing::debug!("AdviseThreadMgrEventSink");
@@ -111,71 +169,57 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
                 .cast::<ITfLangBarItemMgr>()?
                 .AddItem(&text_service.this::<ITfLangBarItemButton>()?)?;
         };
+        text_service.lang_bar_item_added = true;
         drop(text_service);
         if let Ok(mode) = IMEState::get().map(|state| state.input_mode.clone()) {
             self.update_open_close(&mode);
         }
 
-        tracing::debug!("Activate success");
-
         Ok(())
     }
 
-    #[macros::anyhow]
-    #[tracing::instrument(skip(self))]
-    fn Deactivate(&self) -> Result<()> {
-        tracing::debug!("Deactivated");
-
-        // Every registration must be removed even if an earlier step fails,
-        // e.g. when the server has already exited.
+    /// Removes what Activate registered, as far as it got, and drops the
+    /// self-reference. Every step runs even if an earlier one fails, e.g.
+    /// when the server has already exited.
+    fn release_registrations(&self) -> Result<()> {
         let mut failed = false;
         let mut check = |step: &str, result: Result<()>| {
             if let Err(error) = result {
-                tracing::error!("Deactivate: {step} failed: {error:?}");
+                tracing::error!("{step} failed: {error:?}");
                 failed = true;
             }
         };
 
-        check("end composition", self.end_composition_on_deactivate());
-
-        // persist learning memory when the text service is deactivated
-        check(
-            "flush learning",
-            (|| {
-                let ipc_service = IMEState::get()?.ipc_service.clone();
-                if let Some(mut ipc_service) = ipc_service {
-                    ipc_service.flush_learning()?;
-                }
-                Ok(())
-            })(),
-        );
-
         let mut text_service = self.borrow_mut()?;
         if let Some(thread_mgr) = text_service.thread_mgr.clone() {
-            tracing::debug!("UnadviseKeyEventSink");
-            check(
-                "unadvise key event sink",
-                (|| unsafe {
-                    thread_mgr
-                        .cast::<ITfKeystrokeMgr>()?
-                        .UnadviseKeyEventSink(text_service.tid)?;
-                    Ok(())
-                })(),
-            );
+            if std::mem::take(&mut text_service.key_event_sink_advised) {
+                tracing::debug!("UnadviseKeyEventSink");
+                check(
+                    "unadvise key event sink",
+                    (|| unsafe {
+                        thread_mgr
+                            .cast::<ITfKeystrokeMgr>()?
+                            .UnadviseKeyEventSink(text_service.tid)?;
+                        Ok(())
+                    })(),
+                );
+            }
 
-            tracing::debug!("Remove langbar");
-            check(
-                "remove langbar item",
-                (|| unsafe {
-                    thread_mgr
-                        .cast::<ITfLangBarItemMgr>()?
-                        .RemoveItem(&text_service.this::<ITfLangBarItemButton>()?)?;
-                    Ok(())
-                })(),
-            );
+            if std::mem::take(&mut text_service.lang_bar_item_added) {
+                tracing::debug!("Remove langbar");
+                check(
+                    "remove langbar item",
+                    (|| unsafe {
+                        thread_mgr
+                            .cast::<ITfLangBarItemMgr>()?
+                            .RemoveItem(&text_service.this::<ITfLangBarItemButton>()?)?;
+                        Ok(())
+                    })(),
+                );
+            }
 
-            tracing::debug!("UnadviseThreadMgrEventSink");
             if let Some(cookie) = text_service.thread_mgr_sink_cookie.take() {
+                tracing::debug!("UnadviseThreadMgrEventSink");
                 check(
                     "unadvise thread manager event sink",
                     (|| unsafe {
@@ -196,7 +240,6 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
         text_service.tid = 0;
         text_service.activation += 1;
         text_service.thread_mgr = None;
-        text_service.thread_mgr_sink_cookie = None;
         // break the self-reference so TSF's release can free this instance
         text_service.this = None;
         // destroys the window; results still in flight are dropped
@@ -204,10 +247,8 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
         drop(text_service);
 
         if failed {
-            anyhow::bail!("Deactivate completed with errors");
+            anyhow::bail!("some registrations could not be removed");
         }
-        tracing::debug!("Deactivate success");
-
         Ok(())
     }
 }

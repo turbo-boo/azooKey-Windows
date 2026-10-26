@@ -97,15 +97,20 @@ impl CLSIDMgr {
 // register the category (entitlements of textservice) of the TextService
 pub struct CategoryMgr;
 impl CategoryMgr {
-    const CATEGORIES: [GUID; 7] = [
+    const CATEGORIES: [GUID; 6] = [
         GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER,
         GUID_TFCAT_TIPCAP_COMLESS,
         GUID_TFCAT_TIPCAP_INPUTMODECOMPARTMENT,
-        GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
         GUID_TFCAT_TIP_KEYBOARD,
         GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
         GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
     ];
+
+    /// Registered by earlier versions, but not supported: the candidate
+    /// window is not offered as a UI element (ITfUIElement), so a UILess
+    /// application (e.g. a full-screen game) would get no candidates it can
+    /// draw. Removed on registration so upgrades drop the claim.
+    const RETIRED_CATEGORIES: [GUID; 1] = [GUID_TFCAT_TIPCAP_UIELEMENTENABLED];
 
     pub fn register() -> anyhow::Result<()> {
         unsafe {
@@ -115,8 +120,20 @@ impl CategoryMgr {
             for cat in Self::CATEGORIES.iter() {
                 catmgr.RegisterCategory(&GUID_TEXT_SERVICE, cat, &GUID_TEXT_SERVICE)?;
             }
+            Self::unregister_retired(&catmgr);
 
             Ok(())
+        }
+    }
+
+    /// Best effort: a retired category is usually not registered at all.
+    unsafe fn unregister_retired(catmgr: &ITfCategoryMgr) {
+        for cat in Self::RETIRED_CATEGORIES.iter() {
+            if let Err(error) =
+                catmgr.UnregisterCategory(&GUID_TEXT_SERVICE, cat, &GUID_TEXT_SERVICE)
+            {
+                tracing::debug!("Retired category {cat:?} not removed: {error:?}");
+            }
         }
     }
 
@@ -138,6 +155,7 @@ impl CategoryMgr {
                     }
                 }
             }
+            Self::unregister_retired(&catmgr);
 
             result
         }

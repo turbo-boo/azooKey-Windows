@@ -108,9 +108,14 @@ fn initialize(path: &str) {
     }
 }
 
-fn add_text(input: &str) -> RawComposingText {
+/// The text the converter is given crosses the FFI as a C string, which
+/// cannot carry NUL; protobuf strings can.
+fn c_string(text: &str) -> Result<CString, Status> {
+    CString::new(text).map_err(|_| Status::invalid_argument("text must not contain NUL"))
+}
+
+fn add_text(input: &CString) -> RawComposingText {
     unsafe {
-        let input = CString::new(input).expect("CString::new failed");
         let mut cursor: c_int = 0;
 
         let result = AppendText(input.as_ptr(), &mut cursor);
@@ -321,7 +326,7 @@ impl AzookeyService for MyAzookeyService {
         &self,
         request: Request<AppendTextRequest>,
     ) -> Result<Response<AppendTextResponse>, Status> {
-        let input = request.into_inner().text_to_append;
+        let input = c_string(&request.into_inner().text_to_append)?;
         let composing_text = add_text(&input);
 
         Ok(Response::new(AppendTextResponse {
@@ -403,7 +408,7 @@ impl AzookeyService for MyAzookeyService {
             .last()
             .unwrap_or_default();
 
-        let context = CString::new(trimmed_context).expect("CString::new failed");
+        let context = c_string(trimmed_context)?;
 
         unsafe { SetContext(context.as_ptr()) };
         Ok(Response::new(shared::proto::SetContextResponse {}))

@@ -1,10 +1,13 @@
 use windows::{
-    core::GUID,
+    core::{Interface as _, GUID},
     Win32::{
         Foundation::{BOOL, LPARAM, WPARAM},
         UI::{
             Input::KeyboardAndMouse::VK_CONTROL,
-            TextServices::{ITfContext, ITfKeyEventSink_Impl},
+            TextServices::{
+                ITfCompartmentMgr, ITfContext, ITfKeyEventSink_Impl, GUID_COMPARTMENT_EMPTYCONTEXT,
+                GUID_COMPARTMENT_KEYBOARD_DISABLED,
+            },
         },
     },
 };
@@ -41,6 +44,30 @@ fn should_intercept_control_shortcut(
         )
 }
 
+/// Whether the context says not to take keyboard input:
+/// GUID_COMPARTMENT_KEYBOARD_DISABLED (keyboard disabled) or
+/// GUID_COMPARTMENT_EMPTYCONTEXT (the context is empty), both nonzero
+/// DWORDs in the context's own compartments. Keys then go to the
+/// application untouched.
+fn keyboard_disabled(context: &ITfContext) -> bool {
+    let Ok(compartments) = context.cast::<ITfCompartmentMgr>() else {
+        return false;
+    };
+    [
+        GUID_COMPARTMENT_KEYBOARD_DISABLED,
+        GUID_COMPARTMENT_EMPTYCONTEXT,
+    ]
+    .iter()
+    .any(|guid| unsafe {
+        compartments
+            .GetCompartment(guid)
+            .and_then(|compartment| compartment.GetValue())
+            .ok()
+            .and_then(|value| i32::try_from(&value).ok())
+            .is_some_and(|value| value != 0)
+    })
+}
+
 // sink (aka event listener) for key events
 impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
     #[macros::anyhow]
@@ -51,6 +78,11 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> Result<BOOL> {
+        let _own = self.own_activity();
+        if pic.is_some_and(keyboard_disabled) {
+            return Ok(false.into());
+        }
+
         // A control shortcut needs one pass through OnKeyDown so the active
         // composition can be cancelled before the application receives the key.
         // OnKeyDown returns FALSE afterwards, so the shortcut itself is not eaten.
@@ -70,6 +102,11 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
     #[macros::anyhow]
     #[tracing::instrument(skip(self))]
     fn OnKeyDown(&self, pic: Option<&ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
+        let _own = self.own_activity();
+        if pic.is_some_and(keyboard_disabled) {
+            return Ok(false.into());
+        }
+
         if should_intercept_control_shortcut(
             VK_CONTROL.is_pressed(),
             wparam.0,

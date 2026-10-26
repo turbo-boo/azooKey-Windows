@@ -173,6 +173,7 @@ impl TextServiceFactory {
         if_refused: IfRefused,
         work: impl FnOnce(&TextServiceFactory) -> Result<()> + 'static,
     ) -> Result<()> {
+        let _own = self.own_activity();
         let (tid, activation, this, composition) = {
             let text_service = self.borrow()?;
             let composition = text_service.borrow_composition()?.tip_composition.clone();
@@ -207,7 +208,10 @@ impl TextServiceFactory {
                         )
                     };
                     match queued.take() {
-                        Some(work) if active && tracked => work(factory),
+                        Some(work) if active && tracked => {
+                            let _own = factory.own_activity();
+                            work(factory)
+                        }
                         _ => {
                             tracing::debug!("Dropping work for an outdated composition");
                             if !tracked {

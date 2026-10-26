@@ -6,7 +6,7 @@ use std::{
 
 use windows::{
     core::{Interface, GUID},
-    Win32::UI::TextServices::{ITfContext, ITfTextInputProcessor, ITfThreadMgr},
+    Win32::UI::TextServices::{ITfCompartment, ITfContext, ITfTextInputProcessor, ITfThreadMgr},
 };
 
 use anyhow::{Context, Result};
@@ -85,6 +85,7 @@ pub struct TextService {
     pub key_event_sink_advised: bool,
     pub thread_mgr_sink_cookie: Option<u32>,
     pub thread_focus_sink_cookie: Option<u32>,
+    pub compartment_sinks: Vec<(ITfCompartment, u32)>,
     pub layout_sink: Option<(ITfContext, u32)>,
     pub lang_bar_item_added: bool,
     // brings results of background work back to this thread

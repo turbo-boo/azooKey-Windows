@@ -1,5 +1,5 @@
 use std::{
-    cell::{Ref, RefCell, RefMut},
+    cell::{Cell, Ref, RefCell, RefMut},
     ffi::c_void,
 };
 
@@ -9,9 +9,10 @@ use windows::{
         Foundation::{BOOL, CLASS_E_NOAGGREGATION, E_POINTER},
         System::Com::{IClassFactory, IClassFactory_Impl},
         UI::TextServices::{
-            ITfCompositionSink, ITfDisplayAttributeProvider, ITfKeyEventSink, ITfLangBarItem,
-            ITfLangBarItemButton, ITfLangBarItemSink, ITfSource, ITfTextInputProcessor,
-            ITfTextInputProcessorEx, ITfTextLayoutSink, ITfThreadFocusSink, ITfThreadMgrEventSink,
+            ITfCompartmentEventSink, ITfCompositionSink, ITfDisplayAttributeProvider,
+            ITfKeyEventSink, ITfLangBarItem, ITfLangBarItemButton, ITfLangBarItemSink, ITfSource,
+            ITfTextInputProcessor, ITfTextInputProcessorEx, ITfTextLayoutSink, ITfThreadFocusSink,
+            ITfThreadMgrEventSink,
         },
     },
 };
@@ -33,7 +34,8 @@ use super::text_service::TextService;
     ITfDisplayAttributeProvider,
     ITfLangBarItem,
     ITfLangBarItemButton,
-    ITfSource
+    ITfSource,
+    ITfCompartmentEventSink
 )]
 #[derive(Debug)]
 pub struct TextServiceFactory {
@@ -41,6 +43,19 @@ pub struct TextServiceFactory {
     // The language bar's sink for our item, advised during AddItem. Kept
     // apart from the text service so advising works while it is borrowed.
     lang_bar_sink: RefCell<Option<ITfLangBarItemSink>>,
+    // Nesting depth of the text service's own work (key handling, mode
+    // switches, ...). Compartment changes seen meanwhile are its own doing.
+    own_activity: Cell<u32>,
+}
+
+/// Marks the text service's own work while alive; see
+/// [`TextServiceFactory::own_activity`].
+pub struct OwnActivity<'a>(&'a Cell<u32>);
+
+impl Drop for OwnActivity<'_> {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() - 1);
+    }
 }
 
 impl IClassFactory_Impl for TextServiceFactory_Impl {
@@ -83,6 +98,7 @@ impl TextServiceFactory {
         let factory = Self {
             text_service: RefCell::new(TextService::default()),
             lang_bar_sink: RefCell::default(),
+            own_activity: Cell::new(0),
         };
 
         let this = ITfTextInputProcessor::from(factory);
@@ -99,6 +115,20 @@ impl TextServiceFactory {
 
     pub fn lang_bar_sink(&self) -> Result<RefMut<'_, Option<ITfLangBarItemSink>>> {
         Ok(self.lang_bar_sink.try_borrow_mut()?)
+    }
+
+    /// Marks the text service's own work until the returned value is
+    /// dropped. While any is in progress, changes of the open/close and
+    /// conversion compartments are taken as its own doing (publishing the
+    /// mode, or IMM32 reopening the IME when a composition starts) and not
+    /// as a request from the application.
+    pub fn own_activity(&self) -> OwnActivity<'_> {
+        self.own_activity.set(self.own_activity.get() + 1);
+        OwnActivity(&self.own_activity)
+    }
+
+    pub fn in_own_activity(&self) -> bool {
+        self.own_activity.get() > 0
     }
 }
 

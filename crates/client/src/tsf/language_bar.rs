@@ -15,16 +15,13 @@ use windows::{
 };
 
 use crate::{
-    engine::{
-        client_action::ClientAction, composition::CompositionState, input_mode::InputMode,
-        state::IMEState, theme::get_theme,
-    },
+    engine::{input_mode::InputMode, state::IMEState, theme::get_theme},
     globals::{DllModule, GUID_TEXT_SERVICE, TEXTSERVICE_LANGBARITEMSINK_COOKIE},
 };
 
 use anyhow::{Context as _, Result};
 
-use super::{edit_session::IfRefused, factory::TextServiceFactory_Impl};
+use super::factory::TextServiceFactory_Impl;
 
 const INFO: TF_LANGBARITEMINFO = TF_LANGBARITEMINFO {
     clsidService: GUID_TEXT_SERVICE,
@@ -66,21 +63,12 @@ impl ITfLangBarItem_Impl for TextServiceFactory_Impl {
 impl ITfLangBarItemButton_Impl for TextServiceFactory_Impl {
     #[macros::anyhow]
     fn OnClick(&self, _click: TfLBIClick, _pt: &POINT, _prcarea: *const RECT) -> Result<()> {
-        self.run_outside_key_event(IfRefused::RunWithoutComposition, |factory| {
-            let mode = match IMEState::get()?.input_mode {
+        // toggles the mode current when the switch runs
+        self.switch_input_mode(|| {
+            Ok(match IMEState::get()?.input_mode {
                 InputMode::Latin => InputMode::Kana,
                 InputMode::Kana => InputMode::Latin,
-            };
-            // Like the keyboard toggle, commit an active composition first so
-            // TSF and the engine end it together.
-            let composing =
-                factory.borrow()?.borrow_composition()?.state != CompositionState::None;
-            let mut actions = Vec::new();
-            if composing {
-                actions.push(ClientAction::EndComposition);
-            }
-            actions.push(ClientAction::SetIMEMode(mode));
-            factory.handle_action(&actions, CompositionState::None)
+            })
         })
     }
 

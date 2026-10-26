@@ -62,6 +62,7 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
     #[tracing::instrument(skip(self))]
     fn Deactivate(&self) -> Result<()> {
         tracing::debug!("Deactivated");
+        let _own = self.own_activity();
 
         // Every registration must be removed even if an earlier step fails,
         // e.g. when the server has already exited.
@@ -185,6 +186,10 @@ impl TextServiceFactory_Impl {
         if let Ok(mode) = IMEState::get().map(|state| state.input_mode.clone()) {
             self.update_open_close(&mode);
         }
+        // without it the application cannot switch the mode
+        if let Err(error) = self.advise_compartment_sinks() {
+            tracing::warn!("Cannot follow the open/close state: {error:?}");
+        }
 
         Ok(())
     }
@@ -250,6 +255,17 @@ impl TextServiceFactory_Impl {
                     })(),
                 );
             }
+        }
+
+        for (compartment, cookie) in std::mem::take(&mut text_service.compartment_sinks) {
+            tracing::debug!("Unadvise compartment event sink");
+            check(
+                "unadvise compartment event sink",
+                (|| unsafe {
+                    compartment.cast::<ITfSource>()?.UnadviseSink(cookie)?;
+                    Ok(())
+                })(),
+            );
         }
 
         tracing::debug!("UnadviseTextLayoutSink");

@@ -66,6 +66,11 @@ jobs:
         # launcher; IgnoreNew would skip a second user's logon.
         $policy = $task.SelectSingleNode("//task:Settings/task:MultipleInstancesPolicy", $ns)
         if ($policy.InnerText -ne "Parallel") { throw "Startup task must start one instance per logon" }
+        # Every interactive user (BUILTIN\Users) needs a server and UI, not
+        # only administrators; admins still get their full token.
+        $principal = $task.SelectSingleNode("//task:Principals/task:Principal", $ns)
+        if ($principal.GroupId -ne "S-1-5-32-545") { throw "Startup task must run for every user (BUILTIN\Users)" }
+        if ($principal.RunLevel -ne "HighestAvailable") { throw "Startup task must use the highest available run level" }
 
         $installer = Get-Content "installer/Installer.iss" -Raw
         if ($installer -match "CreateVbsFile|PATH_TO_VBS|wscript\.exe") {

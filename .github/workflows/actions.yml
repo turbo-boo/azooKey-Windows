@@ -252,3 +252,53 @@ jobs:
         name: azookey-setup
         path: build/azookey-setup.exe
         if-no-files-found: error
+
+    - name: Install cargo-llvm-cov
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-llvm-cov
+
+    - name: Coverage of the unit tests and the TSF test
+      shell: pwsh
+      timeout-minutes: 45
+      run: |
+        rustup component add llvm-tools-preview
+        # Its own target directory: the instrumented build must not mix
+        # with the release binaries, which have no coverage data.
+        $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP "coverage-target"
+        cargo llvm-cov show-env --pwsh | Out-String | Invoke-Expression
+        cargo llvm-cov clean --workspace
+        New-Item -ItemType Directory -Force coverage | Out-Null
+        try {
+          foreach ($tests in @(@("-p", "shared"), @("-p", "azookey-server", "--lib"), @("-p", "ui"), @("-p", "azookey-windows", "--lib"), @("-p", "launcher"))) {
+            cargo test --locked @tests
+            if ($LASTEXITCODE -ne 0) { throw "cargo test $tests failed" }
+          }
+          # The text service paths only run inside an application: the TSF
+          # test drives an instrumented debug build of the IME DLL.
+          cargo build --locked -p azookey-windows -p tsf-test
+          if ($LASTEXITCODE -ne 0) { throw "instrumented build failed" }
+          $dll = Join-Path $env:CARGO_TARGET_DIR "debug\azookey_windows.dll"
+          $p = Start-Process regsvr32.exe -ArgumentList "/s", "`"$dll`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "registering $dll failed with $($p.ExitCode)" }
+          & (Join-Path $env:CARGO_TARGET_DIR "debug\azookey-tsf-test.exe") --expect-dll $dll
+          $tsf = $LASTEXITCODE
+
+          $ignore = 'crates[\\/](smoke|tsf-test)[\\/]'
+          cargo llvm-cov report --ignore-filename-regex $ignore --summary-only | Tee-Object coverage/summary.txt
+          cargo llvm-cov report --ignore-filename-regex $ignore --lcov --output-path coverage/lcov.info
+          cargo llvm-cov report --ignore-filename-regex $ignore --html --output-dir coverage
+          "## Coverage (unit tests and the TSF test)`n" + '```' + "`n" + (Get-Content coverage/summary.txt -Raw) + '```' >> $env:GITHUB_STEP_SUMMARY
+          if ($tsf -ne 0) { throw "TSF test with the instrumented debug DLL failed (exit $tsf)" }
+        } finally {
+          # debug builds of the IME trace here
+          Copy-Item -Recurse -ErrorAction SilentlyContinue "$env:LOCALAPPDATA\Azookey\logs" coverage/ime-logs
+        }
+
+    - name: Upload coverage
+      if: success() || failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage
+        path: coverage
+        if-no-files-found: ignore

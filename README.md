@@ -160,6 +160,8 @@ cargo build --release -p tsf-test --target i686-pc-windows-msvc
 target\i686-pc-windows-msvc\release\azookey-tsf-test.exe --expect-dll "path/to/build/x86/azookey_windows.dll"
 ```
 
+CIは単体テストとTSFテストのカバレッジを計測します。結果はジョブのサマリーと成果物`coverage`（HTML、lcov、デバッグビルドのIMEのトレースログ）で確認できます。変換エンジン（`azookey-server`）と候補ウィンドウ（`ui.exe`）はリリースビルドのまま動かすため、これらのプロセス内で実行されるコードは計測されません。
+
 # 関連
 
 - [azooKey/azooKey](https://github.com/azooKey/azooKey): iOS / iPadOS向けの日本語キーボードアプリ

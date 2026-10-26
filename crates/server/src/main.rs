@@ -17,13 +17,17 @@ use shared::{parse_magic_candidates, validate_magic_endpoint_parts, AppConfig};
 
 use std::collections::hash_map::RandomState;
 use std::ffi::{c_char, c_int, CStr, CString};
+use std::fs::{File, OpenOptions};
 use std::hash::BuildHasher;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
 
 const USE_ZENZAI: bool = true;
 static LIVE_CONVERSION_ENABLED: AtomicBool = AtomicBool::new(true);
+/// Lock file in the converter's learning directory, see with_learning_lock.
+static LEARNING_LOCK: OnceLock<PathBuf> = OnceLock::new();
 
 /// The converter's current composition (see ComposingText.composition_id).
 /// Starts from a random value so a restarted server never repeats the
@@ -56,6 +60,7 @@ unsafe extern "C" {
     fn ClearText();
     fn GetInputCount() -> c_int;
     fn GetInputText() -> *mut c_char;
+    fn GetLearningMemoryDirectory() -> *mut c_char;
     fn GetComposedText(lengthPtr: *mut c_int, requestRichCandidates: bool) -> *mut *mut FFICandidate;
     fn CommitCandidate(candidateIndex: c_int);
     fn FlushLearning();
@@ -102,10 +107,38 @@ struct FFICandidateData {
 }
 
 fn initialize(path: &str) {
-    unsafe {
+    let directory = unsafe {
         let path = CString::new(path).expect("CString::new failed");
         Initialize(path.as_ptr(), USE_ZENZAI);
-    }
+        take_string(GetLearningMemoryDirectory())
+    };
+    let _ = LEARNING_LOCK.set(PathBuf::from(directory).join("memory.lock"));
+}
+
+/// Runs `update`, a save or reset of the learning data, while holding the
+/// learning lock. Every session of the user runs its own server and all of
+/// them keep learning in the same directory. Saving reads the stored data,
+/// merges into it and replaces the files, so two servers saving at once
+/// lose one's learning or mix their files.
+fn with_learning_lock(update: impl FnOnce()) -> Result<(), Status> {
+    let lock = || -> std::io::Result<File> {
+        let path = LEARNING_LOCK
+            .get()
+            .ok_or_else(|| std::io::Error::other("the converter is not initialized"))?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
+        // released when the file is closed
+        file.lock()?;
+        Ok(file)
+    };
+    let _lock = lock()
+        .map_err(|error| Status::unavailable(format!("cannot lock the learning data: {error}")))?;
+    update();
+    Ok(())
 }
 
 /// The text the converter is given crosses the FFI as a C string, which
@@ -436,7 +469,7 @@ impl AzookeyService for MyAzookeyService {
         &self,
         _: Request<shared::proto::FlushLearningRequest>,
     ) -> Result<Response<shared::proto::FlushLearningResponse>, Status> {
-        unsafe { FlushLearning() };
+        with_learning_lock(|| unsafe { FlushLearning() })?;
         Ok(Response::new(shared::proto::FlushLearningResponse {}))
     }
 
@@ -444,7 +477,7 @@ impl AzookeyService for MyAzookeyService {
         &self,
         _: Request<shared::proto::ResetLearningRequest>,
     ) -> Result<Response<shared::proto::ResetLearningResponse>, Status> {
-        unsafe { ResetLearning() };
+        with_learning_lock(|| unsafe { ResetLearning() })?;
         Ok(Response::new(shared::proto::ResetLearningResponse {}))
     }
 

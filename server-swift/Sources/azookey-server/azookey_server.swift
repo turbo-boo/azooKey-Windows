@@ -253,6 +253,13 @@ func candidateDisplayText(_ candidate: Candidate) -> String {
     composingText = ComposingText()
 }
 
+/// Directory of the learning data, which the servers of all of the user's
+/// sessions share; the caller serializes saves across them.
+@_silgen_name("GetLearningMemoryDirectory")
+@MainActor public func get_learning_memory_directory() -> UnsafeMutablePointer<CChar> {
+    return learningMemoryURL.withUnsafeFileSystemRepresentation { _strdup($0!) }!
+}
+
 @MainActor func predictionLimit() -> Int {
     let raw = (config["predictionMaxCandidates"] as? NSNumber)?.intValue ?? 5
     return min(10, max(1, raw))

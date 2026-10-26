@@ -120,7 +120,8 @@ export const General = () => {
         }
         const edited = {
             ...magic,
-            timeout_seconds: Math.min(60, Math.max(1, Number(magic.timeout_seconds) || 10)),
+            // The backend stores whole seconds; a fraction would fail the save.
+            timeout_seconds: Math.min(60, Math.max(1, Math.round(Number(magic.timeout_seconds)) || 10)),
         };
         const data = await updateGeneralConfig({
             magic_conversion: changedFields(loadedMagic, edited),
@@ -298,6 +299,7 @@ export const General = () => {
                                 type="number"
                                 min={1}
                                 max={60}
+                                step={1}
                                 className="w-20"
                                 value={magic.timeout_seconds}
                                 onChange={(event) => setMagic((current) => ({ ...current, timeout_seconds: Number(event.target.value) }))}

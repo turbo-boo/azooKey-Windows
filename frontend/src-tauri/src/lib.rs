@@ -12,27 +12,13 @@ use std::path::PathBuf;
 #[derive(Debug)]
 pub struct AppState {
     settings: Mutex<AppConfig>,
-    // Connected on demand: the settings window must open even when the
-    // converter server is not running (e.g. to fix the backend setting).
-    ipc: Mutex<Option<ipc::IPCService>>,
 }
 
 impl AppState {
     fn new() -> Self {
         AppState {
             settings: Mutex::new(AppConfig::new()),
-            ipc: Mutex::new(None),
         }
-    }
-
-    fn ipc(&self) -> anyhow::Result<ipc::IPCService> {
-        let mut ipc = self.ipc.lock();
-        if let Some(service) = ipc.as_ref() {
-            return Ok(service.clone());
-        }
-        let service = ipc::IPCService::new()?;
-        *ipc = Some(service.clone());
-        Ok(service)
     }
 }
 
@@ -47,27 +33,49 @@ fn get_config(state: tauri::State<AppState>) -> AppConfig {
     config.clone()
 }
 
+// Commands that wait for the converter server are async: Tauri runs
+// synchronous commands on the main thread, which would freeze the window while
+// the server is busy.
 #[tauri::command]
-fn update_config(state: tauri::State<AppState>, new_config: AppConfig) -> Result<(), String> {
+async fn update_config(
+    state: tauri::State<'_, AppState>,
+    new_config: AppConfig,
+) -> Result<(), String> {
     // Save first: the cached settings must keep matching the file when the
     // save fails.
-    new_config
-        .write()
+    let saved = new_config.clone();
+    tauri::async_runtime::spawn_blocking(move || saved.write())
+        .await
+        .map_err(|error| error.to_string())?
         .map_err(|error| format!("設定を保存できませんでした: {error}"))?;
     *state.settings.lock() = new_config;
 
     // A server that is not running reads the saved file when it starts.
-    let Ok(mut ipc) = state.ipc() else {
-        return Ok(());
+    let mut ipc = match ipc::IPCService::connect().await {
+        Ok(ipc) => ipc,
+        Err(ipc::ConnectError::NotRunning) => return Ok(()),
+        Err(ipc::ConnectError::Failed(error)) => {
+            return Err(format!(
+                "設定は保存しましたが、変換サーバーへ反映できませんでした: {error}"
+            ))
+        }
     };
-    ipc.update_config().map_err(|error| error.to_string())
+    ipc.update_config().await.map_err(|error| {
+        format!("設定は保存しましたが、変換サーバーへ反映できませんでした: {error}")
+    })
 }
 
 #[tauri::command]
-fn reset_learning(state: tauri::State<AppState>) -> Result<(), String> {
-    state
-        .ipc()
-        .and_then(|mut ipc| ipc.reset_learning())
+async fn reset_learning() -> Result<(), String> {
+    let mut ipc = match ipc::IPCService::connect().await {
+        Ok(ipc) => ipc,
+        Err(ipc::ConnectError::NotRunning) => {
+            return Err("変換サーバーが起動していません".to_string())
+        }
+        Err(ipc::ConnectError::Failed(error)) => return Err(error.to_string()),
+    };
+    ipc.reset_learning()
+        .await
         .map_err(|error| error.to_string())
 }
 

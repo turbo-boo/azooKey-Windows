@@ -7,9 +7,9 @@ use std::{
 
 use anyhow::{Context, Result};
 use windows::{
-    core::PWSTR,
+    core::{HSTRING, PCWSTR, PWSTR},
     Win32::{
-        Foundation::HANDLE,
+        Foundation::{HANDLE, HWND},
         System::{
             Pipes::GetNamedPipeServerProcessId,
             Threading::{
@@ -17,6 +17,7 @@ use windows::{
                 PROCESS_QUERY_LIMITED_INFORMATION,
             },
         },
+        UI::WindowsAndMessaging::{FindWindowExW, GetWindowThreadProcessId, IsWindowVisible},
     },
 };
 
@@ -42,4 +43,22 @@ pub fn pipe_server(pipe: &str) -> Result<(u32, PathBuf)> {
         let image = String::from_utf16_lossy(&name[..length as usize]);
         Ok((process_id, PathBuf::from(image)))
     }
+}
+
+/// Whether the top-level window titled `title` of process `process_id` is
+/// visible; `None` when the process has no such window.
+pub fn window_visible(process_id: u32, title: &str) -> Option<bool> {
+    let title = HSTRING::from(title);
+    let mut after = HWND::default();
+    unsafe {
+        while let Ok(window) = FindWindowExW(HWND::default(), after, PCWSTR::null(), &title) {
+            let mut owner = 0;
+            GetWindowThreadProcessId(window, Some(&mut owner));
+            if owner == process_id {
+                return Some(IsWindowVisible(window).as_bool());
+            }
+            after = window;
+        }
+    }
+    None
 }

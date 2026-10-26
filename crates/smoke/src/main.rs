@@ -255,9 +255,33 @@ async fn check_converter(client: &mut AzookeyServiceClient<Channel>, keys: &str)
     Ok(())
 }
 
-async fn check_window(client: &mut WindowServiceClient<Channel>) -> Result<()> {
-    // More updates than the UI's internal queue holds (32): if the webviews
-    // failed to start, the queue is never drained and these time out.
+/// Title of ui.exe's candidate window.
+const CANDIDATE_WINDOW: &str = "CandidateList";
+
+/// Waits until ui.exe's candidate window is shown or hidden. The UI answers
+/// an RPC once the action is queued and applies it later on its event loop,
+/// in order; the window's state shows how far that got.
+async fn wait_for_candidate_window(process_id: u32, visible: bool) -> Result<()> {
+    let deadline = Instant::now() + CALL_TIMEOUT;
+    loop {
+        match peer::window_visible(process_id, CANDIDATE_WINDOW) {
+            None => bail!("ui.exe (process {process_id}) has no {CANDIDATE_WINDOW} window"),
+            Some(state) if state == visible => return Ok(()),
+            Some(_) if Instant::now() >= deadline => bail!(
+                "the candidate window was not {} within {CALL_TIMEOUT:?}: the UI does not apply \
+                 window actions",
+                if visible { "shown" } else { "hidden" }
+            ),
+            Some(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    }
+}
+
+async fn check_window(client: &mut WindowServiceClient<Channel>, ui_pipe: &str) -> Result<()> {
+    let (ui_process, _) = peer::pipe_server(ui_pipe)?;
+    // More updates than the UI's internal queue holds (32), then the window
+    // must end up shown and, after the final Hide, hidden: the event loop
+    // has applied every action in between.
     let mut samples = Vec::new();
     let candidates: Vec<String> = ["今日", "京", "強"].iter().map(|s| s.to_string()).collect();
     for round in 0..20 {
@@ -282,7 +306,9 @@ async fn check_window(client: &mut WindowServiceClient<Channel>) -> Result<()> {
         )
         .await?;
     }
+    wait_for_candidate_window(ui_process, true).await?;
     timed(&mut samples, client.hide_window(EmptyResponse {})).await?;
+    wait_for_candidate_window(ui_process, false).await?;
     report("window RPCs", &samples);
     Ok(())
 }
@@ -346,7 +372,7 @@ async fn main() -> Result<()> {
     if let Err(error) = converter {
         failures.push(format!("converter: {error:#}"));
     }
-    if let Err(error) = check_window(&mut WindowServiceClient::new(window)).await {
+    if let Err(error) = check_window(&mut WindowServiceClient::new(window), &ui_pipe).await {
         failures.push(format!("candidate window: {error:#}"));
     }
 

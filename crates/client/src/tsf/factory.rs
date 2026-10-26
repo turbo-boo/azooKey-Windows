@@ -10,8 +10,8 @@ use windows::{
         System::Com::{IClassFactory, IClassFactory_Impl},
         UI::TextServices::{
             ITfCompositionSink, ITfDisplayAttributeProvider, ITfKeyEventSink, ITfLangBarItem,
-            ITfLangBarItemButton, ITfSource, ITfTextInputProcessor, ITfTextInputProcessorEx,
-            ITfTextLayoutSink, ITfThreadMgrEventSink,
+            ITfLangBarItemButton, ITfLangBarItemSink, ITfSource, ITfTextInputProcessor,
+            ITfTextInputProcessorEx, ITfTextLayoutSink, ITfThreadMgrEventSink,
         },
     },
 };
@@ -37,6 +37,9 @@ use super::text_service::TextService;
 #[derive(Debug)]
 pub struct TextServiceFactory {
     text_service: RefCell<TextService>,
+    // The language bar's sink for our item, advised during AddItem. Kept
+    // apart from the text service so advising works while it is borrowed.
+    lang_bar_sink: RefCell<Option<ITfLangBarItemSink>>,
 }
 
 impl IClassFactory_Impl for TextServiceFactory_Impl {
@@ -78,6 +81,7 @@ impl TextServiceFactory {
     pub fn create<I: Interface>() -> Result<I> {
         let factory = Self {
             text_service: RefCell::new(TextService::default()),
+            lang_bar_sink: RefCell::default(),
         };
 
         let this = ITfTextInputProcessor::from(factory);
@@ -90,6 +94,10 @@ impl TextServiceFactory {
 
     pub fn borrow(&self) -> Result<Ref<TextService>> {
         Ok(self.text_service.try_borrow()?)
+    }
+
+    pub fn lang_bar_sink(&self) -> Result<RefMut<'_, Option<ITfLangBarItemSink>>> {
+        Ok(self.lang_bar_sink.try_borrow_mut()?)
     }
 }
 

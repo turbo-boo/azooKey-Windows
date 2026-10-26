@@ -2,7 +2,7 @@ use windows::{
     core::{IUnknown, Interface as _, BSTR, GUID, PCWSTR},
     Win32::{
         Foundation::{BOOL, E_INVALIDARG, POINT, RECT},
-        System::Ole::CONNECT_E_CANNOTCONNECT,
+        System::Ole::{CONNECT_E_ADVISELIMIT, CONNECT_E_CANNOTCONNECT, CONNECT_E_NOCONNECTION},
         UI::{
             TextServices::{
                 ITfLangBarItemButton_Impl, ITfLangBarItemSink, ITfLangBarItem_Impl, ITfMenu,
@@ -98,9 +98,9 @@ impl ITfLangBarItemButton_Impl for TextServiceFactory_Impl {
 
     #[macros::anyhow]
     fn GetIcon(&self) -> Result<HICON> {
-        let dll_module = DllModule::get()?;
-        let state = &IMEState::get()?;
-        let input_mode = &state.input_mode;
+        // copy what is needed instead of holding the locks across LoadImageW
+        let hinst = DllModule::get()?.hinst.context("Dll instance not found")?;
+        let input_mode = IMEState::get()?.input_mode.clone();
         let theme = get_theme()?;
 
         let icon_id = match input_mode {
@@ -122,7 +122,7 @@ impl ITfLangBarItemButton_Impl for TextServiceFactory_Impl {
 
         unsafe {
             let handle = LoadImageW(
-                dll_module.hinst.context("Dll instance not found")?,
+                hinst,
                 PCWSTR(icon_id as *mut u16),
                 IMAGE_ICON,
                 0,
@@ -146,27 +146,31 @@ impl ITfSource_Impl for TextServiceFactory_Impl {
         let riid = unsafe { *riid };
 
         if riid != ITfLangBarItemSink::IID {
-            return Err(anyhow::Error::new(windows_core::Error::from_hresult(
-                E_INVALIDARG,
-            )));
+            return Err(windows_core::Error::from(CONNECT_E_CANNOTCONNECT).into());
         }
 
-        if punk.is_none() {
-            return Err(anyhow::Error::new(windows_core::Error::from_hresult(
-                E_INVALIDARG,
-            )));
+        let sink: ITfLangBarItemSink = punk
+            .ok_or_else(|| windows_core::Error::from(E_INVALIDARG))?
+            .cast()?;
+
+        // the item has a single connection point
+        let mut advised = self.lang_bar_sink()?;
+        if advised.is_some() {
+            return Err(windows_core::Error::from(CONNECT_E_ADVISELIMIT).into());
         }
+        // kept to tell the language bar when the icon changes
+        *advised = Some(sink);
 
         Ok(TEXTSERVICE_LANGBARITEMSINK_COOKIE)
     }
 
     #[macros::anyhow]
     fn UnadviseSink(&self, dw_cookie: u32) -> Result<()> {
-        if dw_cookie != TEXTSERVICE_LANGBARITEMSINK_COOKIE {
-            return Err(anyhow::Error::new(windows_core::Error::from_hresult(
-                CONNECT_E_CANNOTCONNECT,
-            )));
+        let mut advised = self.lang_bar_sink()?;
+        if dw_cookie != TEXTSERVICE_LANGBARITEMSINK_COOKIE || advised.is_none() {
+            return Err(windows_core::Error::from(CONNECT_E_NOCONNECTION).into());
         }
+        *advised = None;
 
         Ok(())
     }

@@ -3,10 +3,10 @@ use crate::tsf::factory::TextServiceFactory;
 use windows::{
     core::{Interface, VARIANT},
     Win32::UI::TextServices::{
-        ITfCompartmentMgr, ITfLangBarItemButton, ITfLangBarItemMgr,
-        GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE,
-        TF_CONVERSIONMODE_ALPHANUMERIC, TF_CONVERSIONMODE_FULLSHAPE, TF_CONVERSIONMODE_NATIVE,
-        TF_CONVERSIONMODE_ROMAN,
+        ITfCompartmentMgr, GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION,
+        GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, TF_CONVERSIONMODE_ALPHANUMERIC,
+        TF_CONVERSIONMODE_FULLSHAPE, TF_CONVERSIONMODE_NATIVE, TF_CONVERSIONMODE_ROMAN,
+        TF_LBI_ICON,
     },
 };
 
@@ -20,21 +20,14 @@ pub enum InputMode {
 }
 
 impl TextServiceFactory {
+    /// Asks the language bar to fetch the icon again (GetIcon) after the
+    /// input mode changed.
     pub fn update_lang_bar(&self) -> Result<()> {
-        // change the icon of the language bar item
-        let text_service = self.borrow()?;
-        let thread_mgr = text_service.thread_mgr()?;
-
-        unsafe {
-            thread_mgr
-                .cast::<ITfLangBarItemMgr>()?
-                .RemoveItem(&text_service.this::<ITfLangBarItemButton>()?)?;
-
-            thread_mgr
-                .cast::<ITfLangBarItemMgr>()?
-                .AddItem(&text_service.this::<ITfLangBarItemButton>()?)?;
+        // not advised: the item is not on the language bar, nothing to show
+        let Some(sink) = self.lang_bar_sink()?.clone() else {
+            return Ok(());
         };
-
+        unsafe { sink.OnUpdate(TF_LBI_ICON)? };
         Ok(())
     }
 

@@ -162,15 +162,16 @@ impl TextServiceFactory_Impl {
 
         text_service.display_attribute_atom = atom_map;
 
-        // initialize langbar
-        tracing::debug!("Initialize langbar");
-        unsafe {
-            thread_mgr
-                .cast::<ITfLangBarItemMgr>()?
-                .AddItem(&text_service.this::<ITfLangBarItemButton>()?)?;
-        };
-        text_service.lang_bar_item_added = true;
+        let button = text_service.this::<ITfLangBarItemButton>()?;
+        // AddItem calls back into the item (GetInfo, AdviseSink, GetIcon)
         drop(text_service);
+
+        // initialize langbar; without it only the mode icon is missing
+        tracing::debug!("Initialize langbar");
+        match unsafe { thread_mgr.cast::<ITfLangBarItemMgr>()?.AddItem(&button) } {
+            Ok(()) => self.borrow_mut()?.lang_bar_item_added = true,
+            Err(error) => tracing::warn!("Cannot add the language bar item: {error:?}"),
+        }
         if let Ok(mode) = IMEState::get().map(|state| state.input_mode.clone()) {
             self.update_open_close(&mode);
         }
@@ -245,6 +246,11 @@ impl TextServiceFactory_Impl {
         // destroys the window; results still in flight are dropped
         text_service.message_window = None;
         drop(text_service);
+        // RemoveItem unadvises it; do not keep the language bar alive if not
+        check(
+            "drop language bar sink",
+            self.lang_bar_sink().map(|mut sink| *sink = None),
+        );
 
         if failed {
             anyhow::bail!("some registrations could not be removed");

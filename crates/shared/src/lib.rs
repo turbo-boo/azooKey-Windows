@@ -239,22 +239,50 @@ impl AppConfig {
         result
     }
 
-    pub fn read() -> Self {
+    /// Reads the settings, or the defaults when there is no settings file
+    /// yet. A file that cannot be read or parsed is an error, so a caller that
+    /// saves afterwards does not replace it with the defaults.
+    pub fn load() -> std::io::Result<Self> {
         let config_path = get_config_root().join(SETTINGS_FILENAME);
-        if !config_path.exists() {
-            return Self::default();
-        }
-        let Ok(config_str) = std::fs::read_to_string(&config_path) else {
-            eprintln!("Failed to read settings from {}", config_path.display());
-            return Self::default();
+        let config_str = match std::fs::read_to_string(&config_path) {
+            Ok(config_str) => config_str,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default())
+            }
+            Err(error) => return Err(error),
         };
-        match serde_json::from_str(&config_str) {
-            Ok(config) => config,
-            Err(error) => {
-                eprintln!("Failed to parse settings: {error}");
-                Self::default()
+        Ok(serde_json::from_str(&config_str)?)
+    }
+
+    /// The settings for code that only uses them: the defaults when they
+    /// cannot be read.
+    pub fn read() -> Self {
+        Self::load().unwrap_or_else(|error| {
+            eprintln!("Failed to read settings: {error}");
+            Self::default()
+        })
+    }
+
+    /// Like [`AppConfig::read`], for callers on a hot path (every key press,
+    /// every candidate window update): the file is parsed again only when its
+    /// modification time or size changed since the last call in this process.
+    pub fn read_cached() -> std::sync::Arc<Self> {
+        use std::sync::{Arc, Mutex};
+        type Stamp = Option<(std::time::SystemTime, u64)>;
+        static CACHE: Mutex<Option<(Stamp, Arc<AppConfig>)>> = Mutex::new(None);
+
+        let stamp: Stamp = std::fs::metadata(get_config_root().join(SETTINGS_FILENAME))
+            .and_then(|metadata| Ok((metadata.modified()?, metadata.len())))
+            .ok();
+        let mut cache = CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((cached_stamp, config)) = cache.as_ref() {
+            if stamp.is_some() && *cached_stamp == stamp {
+                return config.clone();
             }
         }
+        let config = Arc::new(Self::read());
+        *cache = Some((stamp, config.clone()));
+        config
     }
 
     pub fn new() -> Self {

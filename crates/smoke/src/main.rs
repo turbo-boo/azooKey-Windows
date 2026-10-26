@@ -22,6 +22,7 @@ use shared::proto::{
 use tonic::transport::{Channel, Endpoint};
 use tower::service_fn;
 
+mod peer;
 mod pipe_acl;
 mod wakeup_probe;
 
@@ -308,6 +309,26 @@ async fn main() -> Result<()> {
     let server = wait_for(&server_pipe, Duration::from_secs(180)).await?;
     let window = wait_for(&ui_pipe, Duration::from_secs(60)).await?;
     println!("connected to {server_pipe} and {ui_pipe}");
+
+    // An Azookey left running in this session keeps its pipes, so the
+    // processes just started fail to create theirs and the old ones would be
+    // tested instead.
+    if let Some(dir) = &args.start {
+        let dir = std::fs::canonicalize(dir)
+            .with_context(|| format!("cannot resolve {}", dir.display()))?;
+        for pipe in [&server_pipe, &ui_pipe] {
+            let (process_id, image) = peer::pipe_server(pipe)?;
+            let image = std::fs::canonicalize(&image)
+                .with_context(|| format!("cannot resolve {}", image.display()))?;
+            ensure!(
+                image.parent() == Some(dir.as_path()),
+                "{pipe} is served by {} (process {process_id}), not by the build in {}; \
+                 stop the running Azookey first",
+                image.display(),
+                dir.display()
+            );
+        }
+    }
 
     let mut failures = Vec::new();
     for pipe in [&server_pipe, &ui_pipe] {

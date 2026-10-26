@@ -1,6 +1,5 @@
 use anyhow::{Context as _, Result};
 use tao::{
-    dpi::PhysicalSize,
     event_loop::EventLoop,
     platform::windows::{WindowBuilderExtWindows, WindowExtWindows},
     window::{Window, WindowBuilder},
@@ -28,8 +27,6 @@ pub fn create_indicator_window(event_loop: &EventLoop<UserEvent>) -> Result<Wind
         .with_transparent(true)
         .build(&event_loop)
         .context("Failed to create window")?;
-
-    window.set_inner_size(PhysicalSize::new(90.0, 90.0));
 
     let hwnd = window.hwnd() as *mut std::ffi::c_void;
 

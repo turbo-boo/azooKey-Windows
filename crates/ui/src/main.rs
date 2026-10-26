@@ -4,7 +4,7 @@ use anyhow::Context as _;
 use azookey_server::TonicNamedPipeServer;
 use ipc::{WindowAction, WindowController, WindowService};
 use shared::{proto::window_service_server::WindowServiceServer, AppConfig};
-use tao::dpi::{PhysicalPosition, PhysicalSize};
+use tao::dpi::PhysicalSize;
 use tao::platform::windows::{EventLoopBuilderExtWindows, WindowExtWindows};
 use tao::{
     event::{Event, StartCause, WindowEvent},
@@ -16,7 +16,7 @@ use tonic::transport::Server;
 use uiaccess::run_with_uiaccess;
 use utils::{monitor_work_area, place_at_caret, Placement};
 use windows::Win32::UI::WindowsAndMessaging::{
-    SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE,
+    SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SW_HIDE,
 };
 use windows::Win32::{
     Foundation::{HWND, RECT},
@@ -31,6 +31,8 @@ pub mod utils;
 
 /// How long the mode indicator stays after the input mode changes.
 const INDICATOR_DURATION: Duration = Duration::from_millis(500);
+/// Mode indicator width and height in CSS pixels; it is centred on the caret.
+const INDICATOR_SIZE: f64 = 90.0;
 
 /// Candidate window width in CSS pixels when the candidates are short.
 const MIN_CANDIDATE_WIDTH: f64 = 225.0;
@@ -41,25 +43,25 @@ const CANDIDATE_OFFSET_X: f64 = 15.0;
 #[derive(Debug)]
 pub enum UserEvent {
     UpdateHeight(i32),
-    /// Place the candidate window again after a scale factor change.
+    /// Place the windows again after a scale factor change.
     Relayout,
     /// The candidate page finished loading.
     CandidatePageReady,
     WindowAction(WindowAction),
 }
 
-/// What the candidate window's placement depends on. The size is kept in CSS
-/// (logical) pixels and converted with the scale factor of the monitor the
-/// window goes to.
-struct CandidateLayout {
-    caret: Option<RECT>,
+/// The size of a window that follows the caret, in CSS (logical) pixels,
+/// converted with the scale factor of the monitor the window goes to, and
+/// how far its left edge is left of the caret.
+struct WindowLayout {
     width: f64,
     height: f64,
+    offset_x: f64,
 }
 
-impl CandidateLayout {
-    fn placement(&self, window: &Window) -> Placement {
-        let caret = self.caret.unwrap_or_else(|| {
+impl WindowLayout {
+    fn placement(&self, caret: Option<RECT>, window: &Window) -> Placement {
+        let caret = caret.unwrap_or_else(|| {
             let position = window.outer_position().unwrap_or_default();
             RECT {
                 left: position.x,
@@ -69,18 +71,11 @@ impl CandidateLayout {
             }
         });
         let (work, scale) = monitor_work_area(caret);
-        place_at_caret(
-            caret,
-            work,
-            scale,
-            self.width,
-            self.height,
-            CANDIDATE_OFFSET_X,
-        )
+        place_at_caret(caret, work, scale, self.width, self.height, self.offset_x)
     }
 
-    fn apply(&self, window: &Window) {
-        let placement = self.placement(window);
+    fn apply(&self, caret: Option<RECT>, window: &Window) {
+        let placement = self.placement(caret, window);
         unsafe {
             let _ = SetWindowPos(
                 HWND(window.hwnd() as *mut std::ffi::c_void),
@@ -241,13 +236,19 @@ async fn run() -> anyhow::Result<()> {
     // show that is still pending.
     let mut indicator_hide_at: Option<Instant> = None;
 
-    let mut candidate_layout = CandidateLayout {
-        caret: None,
+    let mut caret: Option<RECT> = None;
+    let mut candidate_layout = WindowLayout {
         width: MIN_CANDIDATE_WIDTH,
         height: candidate_window
             .inner_size()
             .to_logical::<f64>(candidate_window.scale_factor())
             .height,
+        offset_x: CANDIDATE_OFFSET_X,
+    };
+    let indicator_layout = WindowLayout {
+        width: INDICATOR_SIZE,
+        height: INDICATOR_SIZE,
+        offset_x: INDICATOR_SIZE / 2.0,
     };
     let relayout_proxy = event_loop_proxy.clone();
 
@@ -260,26 +261,37 @@ async fn run() -> anyhow::Result<()> {
                 event: WindowEvent::CloseRequested,
                 ..
             } => *control_flow = ControlFlow::Exit,
-            // Moving the window onto a monitor with another scale factor
-            // makes tao resize it to keep its logical size and move it to
-            // where Windows suggests. Give it the size computed for that
-            // monitor and place it again once tao is done.
+            // Moving a window onto a monitor with another scale factor makes
+            // tao resize it to keep its logical size and move it to where
+            // Windows suggests. Give it the size computed for that monitor
+            // and place it again once tao is done.
             Event::WindowEvent {
                 window_id,
                 event: WindowEvent::ScaleFactorChanged { new_inner_size, .. },
                 ..
-            } if window_id == candidate_window.id() => {
-                let placement = candidate_layout.placement(&candidate_window);
-                *new_inner_size =
-                    PhysicalSize::new(placement.width as u32, placement.height as u32);
-                let _ = relayout_proxy.send_event(UserEvent::Relayout);
+            } => {
+                let placement = if window_id == candidate_window.id() {
+                    Some(candidate_layout.placement(caret, &candidate_window))
+                } else if window_id == indicator_window.id() {
+                    Some(indicator_layout.placement(caret, &indicator_window))
+                } else {
+                    None
+                };
+                if let Some(placement) = placement {
+                    *new_inner_size =
+                        PhysicalSize::new(placement.width as u32, placement.height as u32);
+                    let _ = relayout_proxy.send_event(UserEvent::Relayout);
+                }
             }
             Event::UserEvent(script) => match script {
                 UserEvent::UpdateHeight(height) => {
                     candidate_layout.height = f64::from(height);
-                    candidate_layout.apply(&candidate_window);
+                    candidate_layout.apply(caret, &candidate_window);
                 }
-                UserEvent::Relayout => candidate_layout.apply(&candidate_window),
+                UserEvent::Relayout => {
+                    candidate_layout.apply(caret, &candidate_window);
+                    indicator_layout.apply(caret, &indicator_window);
+                }
                 UserEvent::CandidatePageReady => {
                     candidate_theme.forget_applied();
                     candidate_theme.apply(&candidate_webview, &AppConfig::read_cached().theme);
@@ -317,29 +329,14 @@ async fn run() -> anyhow::Result<()> {
                             bottom,
                             right,
                         } => {
-                            candidate_layout.caret = Some(RECT {
+                            caret = Some(RECT {
                                 left,
                                 top,
                                 right,
                                 bottom,
                             });
-                            candidate_layout.apply(&candidate_window);
-
-                            unsafe {
-                                let _ = SetWindowPos(
-                                    HWND(indicator_hwnd as *mut std::ffi::c_void),
-                                    HWND_TOPMOST,
-                                    0,
-                                    0,
-                                    0,
-                                    0,
-                                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                                );
-                            }
-                            indicator_window.set_outer_position(PhysicalPosition::new(
-                                (left - 45) as f64,
-                                bottom as f64,
-                            ));
+                            candidate_layout.apply(caret, &candidate_window);
+                            indicator_layout.apply(caret, &indicator_window);
                         }
                         WindowAction::SetCandidate { candidates } => {
                             let max_len = candidates
@@ -349,7 +346,7 @@ async fn run() -> anyhow::Result<()> {
                                 .unwrap_or(0);
                             candidate_layout.width =
                                 MIN_CANDIDATE_WIDTH.max(120.0 + max_len as f64 * 18.0);
-                            candidate_layout.apply(&candidate_window);
+                            candidate_layout.apply(caret, &candidate_window);
 
                             let candidates = serde_json::to_string(&candidates)
                                 .context("Failed to serialize candidates")
@@ -371,6 +368,7 @@ async fn run() -> anyhow::Result<()> {
                             indicator_webview
                                 .evaluate_script(&indicator::input_mode_script(&input_method))
                                 .unwrap();
+                            indicator_layout.apply(caret, &indicator_window);
                             let _ = unsafe {
                                 ShowWindow(
                                     HWND(indicator_hwnd as *mut std::ffi::c_void),

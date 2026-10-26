@@ -8,6 +8,8 @@
 # インストール方法
 [Release](https://github.com/fkunn1326/azooKey-Windows/releases)から`azookey-setup.exe`をダウンロードし、インストーラーを実行してください。
 
+インストールには管理者権限が必要です。インストール先は`C:\Program Files\Azookey`に固定されており、`/DIR=`などで別のフォルダーを指定することはできません。変換エンジンはログオン時に、そのPCのすべてのユーザーで起動します。
+
 # 機能
 
 - [x] ライブ変換

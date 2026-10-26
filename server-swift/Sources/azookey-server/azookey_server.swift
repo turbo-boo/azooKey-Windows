@@ -11,6 +11,9 @@ import ffi
 @MainActor var lastCandidates: [Candidate] = []
 @MainActor var lastCommittedCandidate: Candidate?
 @MainActor var lastPredictionCandidates: [PostCompositionPredictionCandidate] = []
+/// Parsing the emoji dictionary reads and splits the whole file, so it is
+/// done once in Initialize instead of for every conversion request.
+@MainActor var textReplacer: TextReplacer = .empty
 @MainActor var config: [String : Any] = [
     "enable": false,
     "profile": "",
@@ -88,9 +91,7 @@ import ffi
         dictionaryResourceURL: execURL.appendingPathComponent("Dictionary"),
         memoryDirectoryURL: learningMemoryURL,
         sharedContainerURL: appDataURL,
-        textReplacer: .init {
-            return execURL.appendingPathComponent("EmojiDictionary").appendingPathComponent("emoji_all_E15.1.txt")
-        },
+        textReplacer: textReplacer,
         // zenzai
         zenzaiMode: config["enable"] as! Bool ? .on(
             weight: execURL.appendingPathComponent("zenz.gguf"),
@@ -223,6 +224,9 @@ func candidateDisplayText(_ candidate: Candidate) -> String {
         appDataURL = execURL.appendingPathComponent("UserData", isDirectory: true)
     }
     learningMemoryURL = appDataURL.appendingPathComponent("LearningMemory", isDirectory: true)
+    textReplacer = TextReplacer {
+        execURL.appendingPathComponent("EmojiDictionary").appendingPathComponent("emoji_all_E15.1.txt")
+    }
 
     do {
         try FileManager.default.createDirectory(

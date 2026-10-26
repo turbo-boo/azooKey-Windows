@@ -132,19 +132,51 @@ pub fn to_katakana(s: &str) -> String {
     result
 }
 
+/// Half-width forms (U+FF61..U+FF9F) of the Japanese punctuation, the
+/// prolonged sound mark and the sound marks that kana input contains.
+fn half_width_kana_symbol(c: char) -> Option<char> {
+    Some(match c {
+        '。' => '｡',
+        '「' => '｢',
+        '」' => '｣',
+        '、' => '､',
+        '・' => '･',
+        'ー' => 'ｰ',
+        '゛' | '\u{3099}' => 'ﾞ',
+        '゜' | '\u{309A}' => 'ﾟ',
+        _ => return None,
+    })
+}
+
+/// F8: half-width katakana. Japanese punctuation and the prolonged sound
+/// mark take their half-width katakana forms; other full-width symbols
+/// typed in kana mode return to ASCII.
 pub fn to_half_katakana(s: &str) -> String {
     let mut result = String::new();
-    let mut iter = s.chars().peekable();
 
-    while let Some(c) = iter.next() {
-        let c = to_halfwidth(&c.to_string()).chars().next().unwrap();
-
-        if let Some(&(_, hankaku_katakana)) = KANA_MAP.get(&c.to_string().as_str()) {
+    for c in s.chars() {
+        if let Some(symbol) = half_width_kana_symbol(c) {
+            result.push(symbol);
+        } else if let Some(&(_, hankaku_katakana)) = KANA_MAP.get(c.to_string().as_str()) {
             result.push_str(hankaku_katakana);
         } else {
-            result.push(c);
+            result.push_str(&to_halfwidth(&c.to_string()));
         }
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::to_half_katakana;
+
+    #[test]
+    fn half_katakana_uses_half_width_kana_symbols() {
+        assert_eq!(to_half_katakana("こーひー"), "ｺｰﾋｰ");
+        assert_eq!(to_half_katakana("「が、ぱ。」・"), "｢ｶﾞ､ﾊﾟ｡｣･");
+        assert_eq!(to_half_katakana("か\u{309A}"), "ｶﾟ");
+        // symbols without a kana form go back to ASCII
+        assert_eq!(to_half_katakana("！？"), "!?");
+    }
 }

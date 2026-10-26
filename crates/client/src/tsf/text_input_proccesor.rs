@@ -102,6 +102,10 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
                 .cast::<ITfLangBarItemMgr>()?
                 .AddItem(&text_service.this::<ITfLangBarItemButton>()?)?;
         };
+        drop(text_service);
+        if let Ok(mode) = IMEState::get().map(|state| state.input_mode.clone()) {
+            self.update_open_close(&mode);
+        }
 
         tracing::debug!("Activate success");
 

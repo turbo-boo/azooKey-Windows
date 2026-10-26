@@ -1,8 +1,11 @@
 use crate::tsf::factory::TextServiceFactory;
 
 use windows::{
-    core::Interface,
-    Win32::UI::TextServices::{ITfLangBarItemButton, ITfLangBarItemMgr},
+    core::{Interface, VARIANT},
+    Win32::UI::TextServices::{
+        ITfCompartmentMgr, ITfLangBarItemButton, ITfLangBarItemMgr,
+        GUID_COMPARTMENT_KEYBOARD_OPENCLOSE,
+    },
 };
 
 use anyhow::Result;
@@ -31,5 +34,33 @@ impl TextServiceFactory {
         };
 
         Ok(())
+    }
+
+    /// Publishes the input mode as the keyboard open/close state. IMM32
+    /// applications read it through ImmGetOpenStatus; Sakura Editor, for one,
+    /// places the composition window at the caret only while the IME is open,
+    /// so it showed up at the top left of the screen.
+    pub fn update_open_close(&self, mode: &InputMode) {
+        let result: Result<()> = (|| {
+            let (thread_mgr, tid) = {
+                let text_service = self.borrow()?;
+                (text_service.thread_mgr()?, text_service.tid)
+            };
+            let open = i32::from(*mode == InputMode::Kana);
+            unsafe {
+                let compartment = thread_mgr
+                    .cast::<ITfCompartmentMgr>()?
+                    .GetCompartment(&GUID_COMPARTMENT_KEYBOARD_OPENCLOSE)?;
+                // called on every focus change: write only when it changes
+                if i32::try_from(&compartment.GetValue()?).ok() != Some(open) {
+                    compartment.SetValue(tid, &VARIANT::from(open))?;
+                }
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = result {
+            tracing::warn!("Failed to publish the open/close state: {error:?}");
+        }
     }
 }

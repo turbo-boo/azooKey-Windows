@@ -1066,6 +1066,9 @@ impl TextServiceFactory {
                             tracing::warn!("Cannot locate the caret for the indicator: {error:?}")
                         }
                     }
+                    // After the indicator composition: in IMM32 applications
+                    // starting one opens the IME again.
+                    self.update_open_close(mode);
 
                     let mut ime_state = IMEState::get()?;
                     ime_state.input_mode = mode.clone();

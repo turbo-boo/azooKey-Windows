@@ -2,7 +2,7 @@ use windows::Win32::UI::TextServices::{ITfContext, ITfDocumentMgr, ITfThreadMgrE
 
 use anyhow::Result;
 
-use crate::engine::{client_action::ClientAction, composition::CompositionState};
+use crate::engine::{client_action::ClientAction, composition::CompositionState, state::IMEState};
 
 use super::{edit_session::IfRefused, factory::TextServiceFactory_Impl};
 
@@ -24,6 +24,10 @@ impl ITfThreadMgrEventSink_Impl for TextServiceFactory_Impl {
         _prevfocus: Option<&ITfDocumentMgr>,
     ) -> Result<()> {
         self.update_lang_bar()?;
+        // the mode is process-wide; another thread may have changed it
+        if let Ok(mode) = IMEState::get().map(|state| state.input_mode.clone()) {
+            self.update_open_close(&mode);
+        }
 
         // if focus is changed, the text layout sink should be updated
         if let Some(focus) = focus {

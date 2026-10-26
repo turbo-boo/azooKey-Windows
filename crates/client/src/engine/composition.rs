@@ -237,7 +237,7 @@ pub(crate) fn ctrl_space_shortcut_enabled(wparam: WPARAM) -> bool {
     if !is_ctrl_pressed() || wparam.0 != 0x20 {
         return false;
     }
-    AppConfig::read().shortcuts.ctrl_space_toggle
+    AppConfig::read_cached().shortcuts.ctrl_space_toggle
 }
 
 impl TextServiceFactory {
@@ -273,7 +273,8 @@ impl TextServiceFactory {
         let alt_backquote = !ctrl_pressed && is_alt_backquote_key(wparam, lparam, alt_pressed);
 
         if ctrl_space || alt_backquote {
-            let shortcuts = AppConfig::read().shortcuts;
+            let config = AppConfig::read_cached();
+            let shortcuts = &config.shortcuts;
             if ctrl_space && !shortcuts.ctrl_space_toggle {
                 return Ok(None);
             }

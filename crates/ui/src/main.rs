@@ -33,9 +33,6 @@ pub mod utils;
 #[derive(Debug)]
 pub enum UserEvent {
     UpdateHeight(i32),
-    UpdateCandidates(String),
-    UpdateSelection(i32),
-    UpdateInputMethod(String),
     WindowAction(WindowAction),
 }
 
@@ -191,21 +188,6 @@ async fn run() -> anyhow::Result<()> {
                 ..
             } => *control_flow = ControlFlow::Exit,
             Event::UserEvent(script) => match script {
-                UserEvent::UpdateCandidates(candidates) => {
-                    candidate_webview
-                        .evaluate_script(&format!("updateCandidates({})", candidates))
-                        .unwrap();
-                }
-                UserEvent::UpdateSelection(index) => {
-                    candidate_webview
-                        .evaluate_script(&format!("updateSelection({})", index))
-                        .unwrap();
-                }
-                UserEvent::UpdateInputMethod(input_method) => {
-                    indicator_webview
-                        .evaluate_script(&indicator::input_mode_script(&input_method))
-                        .unwrap();
-                }
                 UserEvent::UpdateHeight(height) => {
                     let width = candidate_window.inner_size().width as i32;
                     candidate_window.set_inner_size(LogicalSize::new(width, height));
@@ -314,20 +296,22 @@ async fn run() -> anyhow::Result<()> {
                                 .context("Failed to serialize candidates")
                                 .unwrap();
 
-                            event_loop_proxy
-                                .send_event(UserEvent::UpdateCandidates(candidates))
+                            // Apply right away: re-posting it would put it
+                            // behind a Show that is already queued, and the
+                            // window would appear with the previous list.
+                            candidate_webview
+                                .evaluate_script(&format!("updateCandidates({})", candidates))
                                 .unwrap();
                         }
                         WindowAction::SetSelection { index } => {
-                            event_loop_proxy
-                                .send_event(UserEvent::UpdateSelection(index))
+                            candidate_webview
+                                .evaluate_script(&format!("updateSelection({})", index))
                                 .unwrap();
                         }
                         WindowAction::SetInputMode(input_method) => {
-                            event_loop_proxy
-                                .send_event(UserEvent::UpdateInputMethod(input_method))
+                            indicator_webview
+                                .evaluate_script(&indicator::input_mode_script(&input_method))
                                 .unwrap();
-
                             let task_guard = task_guard.try_lock();
 
                             if let Ok(mut task_guard) = task_guard {

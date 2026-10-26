@@ -1070,8 +1070,10 @@ impl TextServiceFactory {
                     // starting one opens the IME again.
                     self.update_open_close(mode);
 
-                    let mut ime_state = IMEState::get()?;
-                    ime_state.input_mode = mode.clone();
+                    // Hold the process-wide state only for the assignment: the
+                    // language bar (GetIcon) and other threads' keys read it
+                    // while the COM and IPC calls below run.
+                    IMEState::get()?.input_mode = mode.clone();
 
                     // update the language bar
                     self.update_lang_bar()?;

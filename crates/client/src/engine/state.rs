@@ -29,14 +29,20 @@ impl IMEState {
     /// Returns the server connection, connecting first if the server was not
     /// reachable when the text service was activated (e.g. right after logon).
     pub fn ipc_service() -> anyhow::Result<IPCService> {
-        let mut state = Self::get()?;
-        if let Some(ipc_service) = &state.ipc_service {
+        if let Some(ipc_service) = &Self::get()?.ipc_service {
             return Ok(ipc_service.clone());
         }
 
+        // Connect without holding the lock: IMEState::get only tries to lock,
+        // so other threads' keys and the language bar icon would fail while
+        // this waits for the server.
         let mut ipc_service = IPCService::new()?;
         ipc_service.append_text("".to_string())?;
-        state.ipc_service = Some(ipc_service.clone());
-        Ok(ipc_service)
+
+        // another thread may have connected meanwhile; keep one connection
+        Ok(Self::get()?
+            .ipc_service
+            .get_or_insert(ipc_service)
+            .clone())
     }
 }

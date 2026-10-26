@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use hyper_util::rt::TokioIo;
 use shared::proto::{
     azookey_service_client::AzookeyServiceClient, window_service_client::WindowServiceClient,
@@ -70,17 +70,26 @@ async fn connect(pipe: &str) -> Result<Channel> {
     Ok(channel)
 }
 
+/// Connects to `pipe`, retrying until `within` has passed. The deadline also
+/// bounds a connection attempt itself, which waits as long as every
+/// instance of the pipe is busy.
 async fn wait_for(pipe: &str, within: Duration) -> Result<Channel> {
-    let deadline = Instant::now() + within;
-    loop {
-        match connect(pipe).await {
-            Ok(channel) => return Ok(channel),
-            Err(error) if Instant::now() < deadline => {
-                let _ = error;
-                tokio::time::sleep(Duration::from_millis(500)).await;
+    let mut last_error = None;
+    let attempts = async {
+        loop {
+            match connect(pipe).await {
+                Ok(channel) => return channel,
+                Err(error) => {
+                    last_error = Some(error);
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
             }
-            Err(error) => return Err(error).with_context(|| format!("{pipe} did not come up")),
         }
+    };
+    match tokio::time::timeout(within, attempts).await {
+        Ok(channel) => Ok(channel),
+        Err(_) => Err(last_error.unwrap_or_else(|| anyhow!("every instance stayed busy")))
+            .with_context(|| format!("{pipe} did not come up within {within:?}")),
     }
 }
 

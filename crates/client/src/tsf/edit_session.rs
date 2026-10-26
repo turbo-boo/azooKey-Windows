@@ -1,8 +1,9 @@
 use windows::{
     core::{implement, AsImpl, HRESULT, VARIANT},
     Win32::{
-        Foundation::{E_FAIL, HWND, RECT},
+        Foundation::{E_FAIL, HWND, POINT, RECT},
         UI::{
+            HiDpi::LogicalToPhysicalPointForPerMonitorDPI,
             TextServices::{
                 ITfComposition, ITfCompositionSink, ITfContext, ITfContextComposition,
                 ITfEditSession, ITfEditSession_Impl, ITfInsertAtSelection, ITfRange,
@@ -11,7 +12,7 @@ use windows::{
                 TF_E_LOCKED, TF_IAS_QUERYONLY, TF_SELECTION, TF_SELECTIONSTYLE, TF_ST_CORRECTION,
                 TF_S_ASYNC, TS_E_READONLY,
             },
-            WindowsAndMessaging::{KillTimer, SetTimer, USER_TIMER_MINIMUM},
+            WindowsAndMessaging::{GetAncestor, KillTimer, SetTimer, GA_ROOT, USER_TIMER_MINIMUM},
         },
     },
 };
@@ -149,6 +150,43 @@ fn end_composition_session(
         composition.EndComposition(cookie)?;
         Ok(())
     })
+}
+
+/// Converts a rectangle from GetTextExt to physical screen coordinates.
+/// The application reports it in its window's coordinates, which for a
+/// DPI-unaware or system-aware window on a scaled monitor are scaled
+/// (virtualized) ones, while the candidate window is per-monitor DPI
+/// aware and places itself in physical coordinates. The conversion uses
+/// the root window, which the API supports best (as Mozc's renderer does);
+/// for a per-monitor aware window it changes nothing.
+unsafe fn to_physical(window: HWND, rect: RECT) -> RECT {
+    if window.is_invalid() {
+        return rect;
+    }
+    let root = match GetAncestor(window, GA_ROOT) {
+        root if root.is_invalid() => window,
+        root => root,
+    };
+    let mut top_left = POINT {
+        x: rect.left,
+        y: rect.top,
+    };
+    let mut bottom_right = POINT {
+        x: rect.right,
+        y: rect.bottom,
+    };
+    if LogicalToPhysicalPointForPerMonitorDPI(root, &mut top_left).as_bool()
+        && LogicalToPhysicalPointForPerMonitorDPI(root, &mut bottom_right).as_bool()
+    {
+        RECT {
+            left: top_left.x,
+            top: top_left.y,
+            right: bottom_right.x,
+            bottom: bottom_right.y,
+        }
+    } else {
+        rect
+    }
 }
 
 /// What [`TextServiceFactory::run_outside_key_event`] does when the document
@@ -641,6 +679,11 @@ impl TextServiceFactory {
                             let mut rect = RECT::default();
                             let mut clipped = false.into();
                             view.GetTextExt(cookie, &range, &mut rect, &mut clipped)?;
+                            // a view without a window (rare) is left as is
+                            let rect = match view.GetWnd() {
+                                Ok(window) => to_physical(window, rect),
+                                Err(_) => rect,
+                            };
 
                             ipc_service.set_window_position(
                                 rect.top,

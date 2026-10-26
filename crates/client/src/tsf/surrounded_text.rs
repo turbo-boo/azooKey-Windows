@@ -15,7 +15,7 @@ use windows::{
 
 use crate::engine::state::IMEState;
 
-use super::{edit_session::edit_session, factory::TextServiceFactory};
+use super::{edit_session::sync_read_session, factory::TextServiceFactory};
 
 impl TextServiceFactory {
     fn to_parent_document_if_exists(
@@ -113,7 +113,8 @@ impl TextServiceFactory {
             };
             let parent_context = self.to_parent_context_if_exists(Some(context))?;
 
-            let preceding_text = edit_session::<String>(
+            // reading only: a read/write request fails in read-only documents
+            let preceding_text = sync_read_session::<String>(
                 tid,
                 parent_context.clone(),
                 Rc::new({

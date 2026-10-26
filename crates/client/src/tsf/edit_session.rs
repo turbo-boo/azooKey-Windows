@@ -56,6 +56,18 @@ pub fn edit_session<T>(
         .ok_or_else(|| anyhow::anyhow!("synchronous edit session was not run"))
 }
 
+/// Runs `callback` inside a synchronous read-only edit session and returns
+/// its result, for reading the document while a key is handled. Unlike a
+/// read/write request it also works in read-only documents.
+pub fn sync_read_session<T>(
+    client_id: u32,
+    context: ITfContext,
+    callback: Rc<dyn Fn(u32) -> anyhow::Result<T>>,
+) -> Result<T> {
+    run_edit_session(client_id, context, callback, TF_ES_SYNC | TF_ES_READ)?
+        .ok_or_else(|| anyhow::anyhow!("synchronous edit session was not run"))
+}
+
 /// Runs `callback` in a read-only edit session, now if possible and queued
 /// otherwise, for work whose result nobody waits for.
 pub fn read_session(

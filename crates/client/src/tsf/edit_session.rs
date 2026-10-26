@@ -1,18 +1,28 @@
 use windows::{
-    core::{implement, AsImpl, VARIANT},
+    core::{implement, AsImpl, HRESULT, VARIANT},
     Win32::{
-        Foundation::{E_FAIL, RECT},
-        UI::TextServices::{
-            ITfComposition, ITfCompositionSink, ITfContext, ITfContextComposition, ITfEditSession,
-            ITfEditSession_Impl, ITfInsertAtSelection, ITfRange, GUID_PROP_ATTRIBUTE, TF_AE_NONE,
-            TF_ANCHOR_END, TF_ANCHOR_START, TF_ES_ASYNCDONTCARE, TF_ES_READ, TF_ES_READWRITE,
-            TF_ES_SYNC, TF_IAS_QUERYONLY, TF_SELECTION, TF_SELECTIONSTYLE, TF_ST_CORRECTION,
-            TF_S_ASYNC,
+        Foundation::{E_FAIL, HWND, RECT},
+        UI::{
+            TextServices::{
+                ITfComposition, ITfCompositionSink, ITfContext, ITfContextComposition,
+                ITfEditSession, ITfEditSession_Impl, ITfInsertAtSelection, ITfRange,
+                GUID_PROP_ATTRIBUTE, TF_AE_NONE, TF_ANCHOR_END, TF_ANCHOR_START,
+                TF_ES_ASYNCDONTCARE, TF_ES_READ, TF_ES_READWRITE, TF_ES_SYNC, TF_E_DISCONNECTED,
+                TF_E_LOCKED, TF_IAS_QUERYONLY, TF_SELECTION, TF_SELECTIONSTYLE, TF_ST_CORRECTION,
+                TF_S_ASYNC, TS_E_READONLY,
+            },
+            WindowsAndMessaging::{KillTimer, SetTimer, USER_TIMER_MINIMUM},
         },
     },
 };
 
-use std::{cell::Cell, mem::ManuallyDrop, rc::Rc, time::Instant};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    mem::ManuallyDrop,
+    rc::Rc,
+    time::Instant,
+};
 
 use anyhow::Result;
 
@@ -151,6 +161,42 @@ pub enum IfRefused {
     Skip,
 }
 
+/// How often work refused with TF_E_LOCKED is tried again.
+const LOCKED_RETRIES: u32 = 5;
+
+/// The HRESULT of a failed request, when it came from Windows.
+fn hresult(error: &anyhow::Error) -> Option<HRESULT> {
+    error
+        .downcast_ref::<windows::core::Error>()
+        .map(|error| error.code())
+}
+
+thread_local! {
+    /// Work waiting for its thread timer, by timer id.
+    static DEFERRED: RefCell<HashMap<usize, Box<dyn FnOnce()>>> = RefCell::default();
+}
+
+/// Runs `work` on this thread once it is back in its message loop, from a
+/// one-shot thread timer. Locks held by other text services are only held
+/// while their calls run, so they are gone by then.
+fn defer(work: Box<dyn FnOnce()>) -> Result<()> {
+    let id = unsafe { SetTimer(None, 0, USER_TIMER_MINIMUM, Some(run_deferred)) };
+    if id == 0 {
+        return Err(windows::core::Error::from_win32().into());
+    }
+    DEFERRED.with(|deferred| deferred.borrow_mut().insert(id, work));
+    Ok(())
+}
+
+unsafe extern "system" fn run_deferred(_hwnd: HWND, _msg: u32, id: usize, _time: u32) {
+    let _ = KillTimer(None, id);
+    // taken out first: the work may defer again
+    let work = DEFERRED.with(|deferred| deferred.borrow_mut().remove(&id));
+    if let Some(work) = work {
+        work();
+    }
+}
+
 impl TextServiceFactory {
     /// Runs `work` for an event other than a key stroke: a language bar
     /// click, a focus change or a background result.
@@ -167,11 +213,24 @@ impl TextServiceFactory {
     /// If the document refuses the session (read-only, closed), the
     /// composition cannot be edited any more. `if_refused` decides whether the
     /// work still runs without it: state changes such as a mode switch should,
-    /// work that only rewrites the composition should not.
+    /// work that only rewrites the composition should not. If the request
+    /// comes while another text service holds the lock (TF_E_LOCKED), the
+    /// work is tried again from the thread's message loop, when that lock is
+    /// gone. On any other error the composition is kept and the error
+    /// returned.
     pub fn run_outside_key_event(
         &self,
         if_refused: IfRefused,
         work: impl FnOnce(&TextServiceFactory) -> Result<()> + 'static,
+    ) -> Result<()> {
+        self.run_outside_key_event_with_retries(if_refused, work, LOCKED_RETRIES)
+    }
+
+    fn run_outside_key_event_with_retries(
+        &self,
+        if_refused: IfRefused,
+        work: impl FnOnce(&TextServiceFactory) -> Result<()> + 'static,
+        retries: u32,
     ) -> Result<()> {
         let _own = self.own_activity();
         let (tid, activation, this, composition) = {
@@ -187,14 +246,21 @@ impl TextServiceFactory {
         let (Some(this), Some(composition)) = (this, composition) else {
             return work(self);
         };
+        let context = match composition_context(&composition) {
+            Ok(context) => context,
+            // ended under us (E_UNEXPECTED): there is nothing left to edit
+            Err(error) => return self.refused(if_refused, work, error),
+        };
 
         let work = Rc::new(Cell::new(Some(work)));
         let queued = work.clone();
-        let requested = composition_context(&composition).and_then(|context| {
-            run_edit_session(
-                tid,
-                context.clone(),
-                Rc::new(move |cookie| {
+        let requested = run_edit_session(
+            tid,
+            context.clone(),
+            Rc::new({
+                let this = this.clone();
+                let composition = composition.clone();
+                move |cookie| {
                     // `this` only keeps the object alive until a queued session
                     // runs; whether the work still applies is checked here.
                     let factory: &TextServiceFactory = unsafe { this.as_impl() };
@@ -228,10 +294,10 @@ impl TextServiceFactory {
                             Ok(())
                         }
                     }
-                }),
-                TF_ES_ASYNCDONTCARE | TF_ES_READWRITE,
-            )
-        });
+                }
+            }),
+            TF_ES_ASYNCDONTCARE | TF_ES_READWRITE,
+        );
 
         let error = match requested {
             // ran now, or queued: the session takes the work when it runs
@@ -242,7 +308,50 @@ impl TextServiceFactory {
             // the session ran and the work itself failed
             return Err(error);
         };
-        // the document refused the session; the work has not run
+        // the work has not run
+        match hresult(&error) {
+            Some(code) if code == TF_E_LOCKED && retries > 0 => {
+                tracing::debug!("Another text service holds the lock; trying again later");
+                defer(Box::new(move || {
+                    let factory: &TextServiceFactory = unsafe { this.as_impl() };
+                    // Still applies if nothing else took over in between:
+                    // the same activation, and the same composition or none.
+                    let current = factory.borrow().is_ok_and(|text_service| {
+                        text_service.activation == activation
+                            && text_service.borrow_composition().is_ok_and(|current| {
+                                current
+                                    .tip_composition
+                                    .as_ref()
+                                    .map_or(true, |current| *current == composition)
+                            })
+                    });
+                    if !current {
+                        tracing::debug!("Dropping deferred work for an outdated composition");
+                        return;
+                    }
+                    let result =
+                        factory.run_outside_key_event_with_retries(if_refused, work, retries - 1);
+                    if let Err(error) = result {
+                        tracing::warn!("Deferred work failed: {error:?}");
+                    }
+                }))
+            }
+            Some(code) if code == TS_E_READONLY || code == TF_E_DISCONNECTED => {
+                self.refused(if_refused, work, error)
+            }
+            // possibly passing (out of memory, a lock that stayed taken):
+            // keep the composition, which can still be ended later
+            _ => Err(error),
+        }
+    }
+
+    /// The composition's document cannot be edited any more.
+    fn refused(
+        &self,
+        if_refused: IfRefused,
+        work: impl FnOnce(&TextServiceFactory) -> Result<()>,
+        error: anyhow::Error,
+    ) -> Result<()> {
         tracing::warn!("Cannot edit the composition any more: {error:?}");
         match if_refused {
             IfRefused::RunWithoutComposition => {

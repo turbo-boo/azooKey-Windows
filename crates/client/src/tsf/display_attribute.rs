@@ -23,7 +23,7 @@ use super::factory::TextServiceFactory_Impl;
 // class for display attribute (color, bold, underline, etc.)
 impl ITfDisplayAttributeProvider_Impl for TextServiceFactory_Impl {
     #[macros::anyhow]
-    fn EnumDisplayAttributeInfo(&self) -> windows::core::Result<IEnumTfDisplayAttributeInfo> {
+    fn EnumDisplayAttributeInfo(&self) -> Result<IEnumTfDisplayAttributeInfo> {
         let enum_info = EnumDisplayAttributeInfo::new();
         Ok(enum_info.into())
     }
@@ -32,7 +32,7 @@ impl ITfDisplayAttributeProvider_Impl for TextServiceFactory_Impl {
     fn GetDisplayAttributeInfo(
         &self,
         guid: *const windows_core::GUID,
-    ) -> windows::core::Result<ITfDisplayAttributeInfo> {
+    ) -> Result<ITfDisplayAttributeInfo> {
         let guid = unsafe { *guid };
         let attributes = EnumDisplayAttributeInfo::new();
         for attribute in attributes.attributes {

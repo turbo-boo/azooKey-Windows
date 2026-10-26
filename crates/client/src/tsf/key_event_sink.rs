@@ -44,7 +44,7 @@ fn should_intercept_control_shortcut(
 // sink (aka event listener) for key events
 impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
     #[macros::anyhow]
-    #[tracing::instrument]
+    #[tracing::instrument(skip(self))]
     fn OnTestKeyDown(
         &self,
         pic: Option<&ITfContext>,
@@ -68,7 +68,7 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
     }
 
     #[macros::anyhow]
-    #[tracing::instrument]
+    #[tracing::instrument(skip(self))]
     fn OnKeyDown(&self, pic: Option<&ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
         if should_intercept_control_shortcut(
             VK_CONTROL.is_pressed(),

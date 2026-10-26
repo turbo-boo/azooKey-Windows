@@ -1,6 +1,8 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, Error, GenericArgument, ItemFn, PathArguments, ReturnType, Type};
+use syn::{
+    parse_macro_input, parse_quote, Error, GenericArgument, ItemFn, PathArguments, ReturnType, Type,
+};
 
 fn extract_ok_type(return_type: &ReturnType) -> Result<&Type, TokenStream> {
     if let ReturnType::Type(_, ty) = return_type {
@@ -33,6 +35,9 @@ fn extract_ok_type(return_type: &ReturnType) -> Result<&Type, TokenStream> {
 /// This macro wraps a function that returns a Result with an `anyhow::Result`.
 ///
 /// If the function returns `anyhow::Result<OkType>`, it will be converted to `windows::core::Result<OkType>`.
+/// The function's other attributes (e.g. `#[tracing::instrument]`) are kept.
+/// An error that is, or was caused by, a `windows::core::Error` keeps its
+/// HRESULT; any other error becomes E_FAIL.
 ///
 ///
 /// ```rust
@@ -49,7 +54,7 @@ fn extract_ok_type(return_type: &ReturnType) -> Result<&Type, TokenStream> {
 ///     Ok(v) => Ok(v),
 ///     Err(e) => {
 ///       tracing::error!("Error: {:?}", e);
-///       Err(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))
+///       Err(/* the windows::core::Error in `e`, or E_FAIL */)
 ///     }
 ///   }
 /// }
@@ -58,9 +63,9 @@ pub fn anyhow(_: TokenStream, input: TokenStream) -> TokenStream {
     // parse the input function
     let input_fn = parse_macro_input!(input as ItemFn);
 
-    // get the function name, inputs, and body
-    let fn_name = &input_fn.sig.ident;
-    let fn_inputs = &input_fn.sig.inputs;
+    // get the attributes, visibility and body
+    let attrs = &input_fn.attrs;
+    let vis = &input_fn.vis;
     let fn_body = &input_fn.block;
 
     // check if the function has a return type
@@ -80,16 +85,32 @@ pub fn anyhow(_: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
 
+    let result_type = match &input_fn.sig.output {
+        ReturnType::Type(_, ty) => ty,
+        ReturnType::Default => unreachable!("checked above"),
+    };
+    let mut sig = input_fn.sig.clone();
+    sig.output = parse_quote!(-> ::windows::core::Result<#output>);
+
     // generate the new function
     let generated = quote! {
-        fn #fn_name(#fn_inputs) -> windows::core::Result<#output> {
-            let result: Result<#output> = (|| #fn_body)();
+        #(#attrs)*
+        #vis #sig {
+            let result: #result_type = (|| #fn_body)();
 
             match result {
                 Ok(v) => Ok(v),
                 Err(e) => {
+                    let e: ::anyhow::Error = e.into();
                     tracing::error!("Error: {:?}", e);
-                    Err(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))
+                    // A success code must not reach the caller as an error:
+                    // it would read the out parameters as valid.
+                    match e.downcast_ref::<::windows::core::Error>() {
+                        Some(error) if error.code().is_err() => Err(error.clone()),
+                        _ => Err(::windows::core::Error::from(
+                            ::windows::Win32::Foundation::E_FAIL,
+                        )),
+                    }
                 }
             }
         }

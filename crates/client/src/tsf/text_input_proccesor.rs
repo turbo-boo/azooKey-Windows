@@ -23,7 +23,7 @@ use anyhow::{Context, Result};
 
 impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
     #[macros::anyhow]
-    #[tracing::instrument]
+    #[tracing::instrument(skip(self))]
     fn Activate(&self, ptim: Option<&ITfThreadMgr>, tid: u32) -> Result<()> {
         tracing::debug!("Activated with tid: {tid}");
 
@@ -113,7 +113,7 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
     }
 
     #[macros::anyhow]
-    #[tracing::instrument]
+    #[tracing::instrument(skip(self))]
     fn Deactivate(&self) -> Result<()> {
         tracing::debug!("Deactivated");
 

@@ -8,5 +8,6 @@ members = [
   "crates/macros",
   "crates/launcher",
   "crates/smoke",
+  "crates/tsf-test",
   "frontend/src-tauri"
 ]

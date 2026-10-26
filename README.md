@@ -148,6 +148,18 @@ regsvr32.exe "path/to/build/x86/azookey_windows.dll" /s
 - IMEを解除する際、IMEを使用中のアプリケーション（メモ帳など）を終了しないと、解除できないことがあります。
 - デバッグビルドのIMEは`%LOCALAPPDATA%\Azookey\logs`にトレースログを出力します。Chromeのトレースビューアーで開けます。
 
+#### テスト
+CIでは、ビルドしたIMEのDLLを`azookey-tsf-test`がアプリと同じようにTSF経由で読み込み、キー入力に対して文書に表示される内容を確認します。IMEがクラッシュした場合もテストは失敗します。
+
+手元で実行する場合は、DLLを登録して`launcher.exe`を起動してから、DLLと同じビット数のテストを実行してください。テスト用のウィンドウがキーボードフォーカスを取るため、実行中はPCを操作しないでください。
+```
+cargo build --release -p tsf-test
+target\release\azookey-tsf-test.exe --expect-dll "path/to/build/azookey_windows.dll"
+
+cargo build --release -p tsf-test --target i686-pc-windows-msvc
+target\i686-pc-windows-msvc\release\azookey-tsf-test.exe --expect-dll "path/to/build/x86/azookey_windows.dll"
+```
+
 # 関連
 
 - [azooKey/azooKey](https://github.com/azooKey/azooKey): iOS / iPadOS向けの日本語キーボードアプリ

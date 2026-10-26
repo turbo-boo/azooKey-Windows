@@ -217,6 +217,35 @@ jobs:
         ./target/release/azookey-smoke.exe --start $dir
         if ($LASTEXITCODE -ne 0) { throw "smoke test failed" }
 
+    - name: Build the TSF test host
+      run: |
+        cargo build --locked --release -p tsf-test
+        cargo build --locked --release -p tsf-test --target i686-pc-windows-msvc
+
+    - name: Type through TSF with the built IME
+      shell: pwsh
+      timeout-minutes: 10
+      run: |
+        # A crash must fail the step at once, not wait on an error dialog.
+        $wer = "HKCU:\Software\Microsoft\Windows\Windows Error Reporting"
+        New-Item -Force $wer | Out-Null
+        Set-ItemProperty $wer DontShowUI 1
+        # The smoke test left the converter server and the candidate window
+        # of this copy of the build running in this session.
+        $dir = "C:\AzookeySmoke"
+        # Registered the way the installer does: each DLL by the regsvr32 of
+        # its own bitness.
+        $runs = @(
+          @{ regsvr32 = "$env:SystemRoot\System32\regsvr32.exe"; dll = "$dir\azookey_windows.dll"; host = "target\release\azookey-tsf-test.exe" },
+          @{ regsvr32 = "$env:SystemRoot\SysWOW64\regsvr32.exe"; dll = "$dir\x86\azookey_windows.dll"; host = "target\i686-pc-windows-msvc\release\azookey-tsf-test.exe" }
+        )
+        foreach ($run in $runs) {
+          $p = Start-Process $run.regsvr32 -ArgumentList "/s", "`"$($run.dll)`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "registering $($run.dll) failed with $($p.ExitCode)" }
+          & $run.host --expect-dll $run.dll
+          if ($LASTEXITCODE -ne 0) { throw "TSF test with $($run.dll) failed (exit $LASTEXITCODE)" }
+        }
+
     - name: Upload Setup Artifact
       uses: actions/upload-artifact@v4
       with:

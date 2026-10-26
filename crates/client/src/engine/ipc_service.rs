@@ -205,6 +205,18 @@ fn current_thread_runtime() -> std::io::Result<tokio::runtime::Runtime> {
         .build()
 }
 
+/// Runs `call` on `runtime` from a thread outside it (the TSF thread),
+/// waiting at most `deadline`. tokio registers the timer when `timeout` is
+/// created, which panics outside a runtime context, and a panic in a COM
+/// method aborts the application: so it is created inside `block_on`.
+fn block_on_with_deadline<F: Future>(
+    runtime: &tokio::runtime::Runtime,
+    deadline: Duration,
+    call: F,
+) -> std::result::Result<F::Output, time::error::Elapsed> {
+    runtime.block_on(async { time::timeout(deadline, call).await })
+}
+
 // Candidate window updates do not return data the composition depends on, so
 // the TSF thread only enqueues them. A single consumer keeps them in order.
 fn spawn_window_dispatcher() -> Result<mpsc::UnboundedSender<WindowCommand>> {
@@ -337,10 +349,11 @@ impl IPCService {
     pub fn probe(&mut self) -> Result<()> {
         let request = tonic::Request::new(shared::proto::ClearTextRequest {});
         let runtime = self.runtime.clone();
-        let result = runtime.block_on(time::timeout(
+        let result = block_on_with_deadline(
+            &runtime,
             PROBE_TIMEOUT,
             self.azookey_client.clear_text(request),
-        ));
+        );
         match result {
             Ok(response) => {
                 // an error reply still comes from a server that answers
@@ -381,10 +394,11 @@ macro_rules! converter_call {
     ($self:ident, $method:ident($request:expr)) => {{
         $self.ensure_responsive()?;
         let runtime = $self.runtime.clone();
-        let result = runtime.block_on(time::timeout(
+        let result = block_on_with_deadline(
+            &runtime,
             CONVERTER_RPC_TIMEOUT,
             $self.azookey_client.$method($request),
-        ));
+        );
         $self.finish(result)
     }};
 }
@@ -525,8 +539,29 @@ impl IPCService {
 
 #[cfg(test)]
 mod tests {
-    use super::{Availability, Pause, PAUSE_AFTER_MISSED_DEADLINE};
+    use super::{
+        block_on_with_deadline, current_thread_runtime, Availability, Pause,
+        PAUSE_AFTER_MISSED_DEADLINE,
+    };
     use std::time::{Duration, Instant};
+
+    // TSF calls come in on the application's thread, which is not inside
+    // the runtime. Building the deadline there panicked, and the panic
+    // aborted every application that typed with the IME.
+    #[test]
+    fn deadlines_work_when_called_from_outside_the_runtime() {
+        let runtime = current_thread_runtime().unwrap();
+
+        let missed = block_on_with_deadline(
+            &runtime,
+            Duration::from_millis(20),
+            std::future::pending::<()>(),
+        );
+        assert!(missed.is_err());
+
+        let answered = block_on_with_deadline(&runtime, Duration::from_secs(5), async { 7 });
+        assert_eq!(answered.ok(), Some(7));
+    }
 
     #[test]
     fn a_missed_deadline_pauses_the_converter_until_one_probe() {

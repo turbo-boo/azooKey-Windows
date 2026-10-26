@@ -206,6 +206,12 @@ func candidateDisplayText(_ candidate: Candidate) -> String {
                 // The converter reuses the lattice of an unchanged input,
                 // which was looked up in the previous dictionary.
                 converter.stopComposition()
+                // Learning (CommitCandidate, FlushLearning) follows the
+                // options the converter last received with a conversion
+                // request; hand over the new learning mode right away.
+                converter.sendToDicdataStore(
+                    .setRequestOptions(getOptions(context: (config["context"] as? String) ?? ""))
+                )
             }
         } catch {
             print("Failed to read settings: \(error)")

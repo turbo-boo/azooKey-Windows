@@ -7,7 +7,10 @@ use anyhow::Result;
 use windows::{
     core::PWSTR,
     Win32::{
-        Foundation::{CloseHandle, BOOL, HANDLE, INVALID_HANDLE_VALUE},
+        Foundation::{
+            CloseHandle, SetHandleInformation, BOOL, HANDLE, HANDLE_FLAG_INHERIT,
+            INVALID_HANDLE_VALUE,
+        },
         Security::{
             DuplicateTokenEx, GetTokenInformation, LookupPrivilegeValueW, PrivilegeCheck,
             RevertToSelf, SecurityAnonymous, SecurityImpersonation, SetTokenInformation,
@@ -32,7 +35,7 @@ use windows::{
                 GetStartupInfoW, OpenProcess, OpenProcessToken, ResumeThread, SetThreadToken,
                 TerminateProcess, WaitForSingleObject, CREATE_SUSPENDED, INFINITE,
                 PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
-                STARTUPINFOW,
+                STARTF_USESTDHANDLES, STARTUPINFOW,
             },
         },
     },
@@ -293,6 +296,25 @@ pub fn run_with_uiaccess() -> Result<Option<u32>> {
 
     unsafe {
         GetStartupInfoW(&mut startup_info);
+        // The launcher reads the UI's output through pipes passed as the
+        // standard handles. Handing them on with STARTF_USESTDHANDLES needs
+        // inheritable handles and inheritance turned on; otherwise the
+        // copy's output is lost, or goes to whatever object later gets the
+        // same handle value. The only other inheritable handles in this
+        // process at this point are the ones the launcher passed along.
+        let inherit_handles = startup_info.dwFlags.contains(STARTF_USESTDHANDLES);
+        if inherit_handles {
+            for handle in [
+                startup_info.hStdInput,
+                startup_info.hStdOutput,
+                startup_info.hStdError,
+            ] {
+                if !handle.is_invalid() {
+                    let _ =
+                        SetHandleInformation(handle, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT);
+                }
+            }
+        }
         // The launcher raised this process's priority and exempted it from
         // EcoQoS for the real UI; neither carries over to a child by itself.
         let priority_class = PROCESS_CREATION_FLAGS(GetPriorityClass(GetCurrentProcess()));
@@ -302,7 +324,7 @@ pub fn run_with_uiaccess() -> Result<Option<u32>> {
             PWSTR(command_line.as_mut_ptr()),
             None,
             None,
-            false,
+            inherit_handles,
             CREATE_SUSPENDED | priority_class,
             None,
             None,

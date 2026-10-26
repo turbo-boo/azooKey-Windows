@@ -365,59 +365,111 @@ begin
     RestartReplace(Path, '');
 end;
 
-procedure DeleteLegacyFiles(Dir: String; Pattern: String);
+const
+  LEGACY_FILES = 'azookey.dll,azookey32.dll,azookey_windows.dll,azookey-server.dll,azookey-server.exe,launcher.exe,ui.exe,zenz.gguf,launch.vbs,unins000.exe,unins000.dat,unins000.msg';
+  LEGACY_DIRS = 'x86,llama_cpu,llama_cuda,llama_vulkan,Dictionary,EmojiDictionary';
+
+// Whether Dir is inside Program Files, where only administrators can create
+// junctions or symbolic links. Anywhere else (the old default
+// %APPDATA%\Azookey, or a custom directory, which inherits write access for
+// users from e.g. C:\) a non-elevated user can redirect a path, and every
+// deletion with Setup's rights, or scheduled for SYSTEM with RestartReplace,
+// could then hit a file of the user's choosing.
+function IsInProgramFiles(Dir: String): Boolean;
 var
-  FindRec: TFindRec;
+  Path: String;
 begin
-  if FindFirst(Dir + '\' + Pattern, FindRec) then
-  begin
-    try
-      repeat
-        if FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY = 0 then
-          DeleteOrScheduleFile(Dir + '\' + FindRec.Name);
-      until not FindNext(FindRec);
-    finally
-      FindClose(FindRec);
-    end;
+  Path := Lowercase(AddBackslash(Dir));
+  Result := (Pos(Lowercase(AddBackslash(ExpandConstant('{commonpf64}'))), Path) = 1) or
+    (Pos(Lowercase(AddBackslash(ExpandConstant('{commonpf32}'))), Path) = 1);
+end;
+
+// Joins Items (comma-separated) as a PowerShell array of single-quoted strings.
+function PsStringArray(Items: String): String;
+begin
+  Result := Items;
+  StringChangeEx(Result, '''', '''''', True);
+  StringChangeEx(Result, ',', ''',''', True);
+  Result := '@(''' + Result + ''')';
+end;
+
+// Deletes the legacy files in a directory the user can write to, as the
+// original (non-elevated) user, who owns them; the user's own rights cannot
+// be escalated by redirecting a path. Files still in use (the IME DLLs loaded
+// by running applications) are deleted at the user's next logon through
+// HKCU RunOnce, again with the user's rights. Nothing is done when the
+// original user's token is elevated (Setup started from an elevated process);
+// the files left behind are no longer registered or started.
+procedure RemoveUserWritableLegacyInstall(Dir: String; AllFiles: Boolean);
+var
+  PsDir: String;
+  Script: String;
+  ResultCode: Integer;
+begin
+  PsDir := Dir;
+  StringChangeEx(PsDir, '''', '''''', True);
+  Script :=
+    '$p = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent()); ' +
+    'if ($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { exit 2 }; ' +
+    '$d = ''' + PsDir + '''; ' +
+    '$files = @(' + PsStringArray(LEGACY_FILES) + ' | ForEach-Object { Join-Path $d $_ }); ';
+  if AllFiles then
+    Script := Script +
+      '$files += @(Get-ChildItem -LiteralPath $d -File -ErrorAction SilentlyContinue | ' +
+      'Where-Object { $_.Extension -in ''.exe'',''.dll'' } | ForEach-Object { $_.FullName }); ' +
+      PsStringArray(LEGACY_DIRS) + ' | ForEach-Object { ' +
+      'Remove-Item -LiteralPath (Join-Path $d $_) -Recurse -Force -ErrorAction SilentlyContinue }; ';
+  Script := Script +
+    '$ro = ''HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce''; ' +
+    '$cmd = Join-Path ([Environment]::SystemDirectory) ''cmd.exe''; ' +
+    '$i = 0; ' +
+    'foreach ($f in ($files | Select-Object -Unique)) { ' +
+    'if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { continue }; ' +
+    'try { Remove-Item -LiteralPath $f -Force -ErrorAction Stop } catch { ' +
+    '$i++; ' +
+    'if (-not (Test-Path -LiteralPath $ro)) { New-Item -Path $ro -Force | Out-Null }; ' +
+    'Set-ItemProperty -LiteralPath $ro -Name (''AzookeyLegacyCleanup'' + $i) ' +
+    '-Value ($cmd + '' /c del /f /q '' + [char]34 + $f + [char]34) } }';
+  try
+    if not ExecAsOriginalUser(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+      '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' + Script + '"', '',
+      SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+      Log(Format('Failed to remove the legacy install in %s: %s', [Dir, SysErrorMessage(ResultCode)]))
+    else if ResultCode = 2 then
+      Log(Format('Not removing the legacy install in %s: the original user is elevated', [Dir]))
+    else if ResultCode <> 0 then
+      Log(Format('Removing the legacy install in %s exited with code %d', [Dir, ResultCode]));
+  except
+    Log(Format('Failed to remove the legacy install in %s: %s', [Dir, GetExceptionMessage]));
   end;
 end;
 
 // Removes the program files of an install in another directory by deleting
-// Azookey's own binaries by name. The IME is not unregistered with the old
-// DLLs: the old default directory is writable by the user, so regsvr32 would
-// load whatever DLL is there with administrator rights. Registering the new
-// DLLs (same CLSID, profile and categories) overwrites those entries. The
-// wildcard/subdirectory cleanup (Swift runtime DLLs, llama backends,
-// dictionaries) runs only for the old default %APPDATA%\Azookey, which belongs
-// to Azookey alone; a custom directory may contain other applications' files.
-// %APPDATA%\Azookey also holds settings.json and the learning memory, which
-// are kept.
+// Azookey's own binaries by name: with Setup's rights only inside Program
+// Files, as the original user anywhere else (RemoveUserWritableLegacyInstall).
+// The IME is not unregistered with the old DLLs: the old default directory is
+// writable by the user, so regsvr32 would load whatever DLL is there with
+// administrator rights. Registering the new DLLs (same CLSID, profile and
+// categories) overwrites those entries. The wildcard/subdirectory cleanup
+// (Swift runtime DLLs, llama backends, dictionaries) runs only for the old
+// default %APPDATA%\Azookey, which belongs to Azookey alone; a custom directory
+// may contain other applications' files. %APPDATA%\Azookey also holds
+// settings.json and the learning memory, which are kept.
 procedure RemoveLegacyInstall(Dir: String);
+var
+  Files: TArrayOfString;
+  I: Integer;
 begin
-  DeleteOrScheduleFile(Dir + '\azookey.dll');
-  DeleteOrScheduleFile(Dir + '\azookey32.dll');
-  DeleteOrScheduleFile(Dir + '\azookey_windows.dll');
-  DeleteOrScheduleFile(Dir + '\azookey-server.dll');
-  DeleteOrScheduleFile(Dir + '\azookey-server.exe');
-  DeleteOrScheduleFile(Dir + '\launcher.exe');
-  DeleteOrScheduleFile(Dir + '\ui.exe');
-  DeleteOrScheduleFile(Dir + '\zenz.gguf');
-  DeleteOrScheduleFile(Dir + '\launch.vbs');
-  DeleteOrScheduleFile(Dir + '\unins000.exe');
-  DeleteOrScheduleFile(Dir + '\unins000.dat');
-  DeleteOrScheduleFile(Dir + '\unins000.msg');
-
-  if CompareText(Dir, ExpandConstant('{userappdata}\{#MyAppName}')) <> 0 then
+  if not IsInProgramFiles(Dir) then
+  begin
+    RemoveUserWritableLegacyInstall(Dir,
+      CompareText(Dir, ExpandConstant('{userappdata}\{#MyAppName}')) = 0);
     Exit;
+  end;
 
-  DeleteLegacyFiles(Dir, '*.exe');
-  DeleteLegacyFiles(Dir, '*.dll');
-  DelTree(Dir + '\x86', True, True, True);
-  DelTree(Dir + '\llama_cpu', True, True, True);
-  DelTree(Dir + '\llama_cuda', True, True, True);
-  DelTree(Dir + '\llama_vulkan', True, True, True);
-  DelTree(Dir + '\Dictionary', True, True, True);
-  DelTree(Dir + '\EmojiDictionary', True, True, True);
+  Files := StringSplit(LEGACY_FILES, [','], stExcludeEmpty);
+  for I := 0 to GetArrayLength(Files) - 1 do
+    DeleteOrScheduleFile(Dir + '\' + Files[I]);
 end;
 
 <event('PrepareToInstall')>

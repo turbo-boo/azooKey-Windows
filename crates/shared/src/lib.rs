@@ -22,22 +22,28 @@ fn get_config_root() -> PathBuf {
 const SETTINGS_FILENAME: &str = "settings.json";
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
 pub struct ZenzaiConfig {
     pub enable: bool,
     pub profile: String,
     pub backend: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct ShortcutConfig {
-    #[serde(default = "default_shortcut_enabled")]
-    pub ctrl_space_toggle: bool,
-    #[serde(default = "default_shortcut_enabled")]
-    pub alt_backquote_toggle: bool,
+impl Default for ZenzaiConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            profile: String::new(),
+            backend: "vulkan".to_string(),
+        }
+    }
 }
 
-fn default_shortcut_enabled() -> bool {
-    true
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
+pub struct ShortcutConfig {
+    pub ctrl_space_toggle: bool,
+    pub alt_backquote_toggle: bool,
 }
 
 impl Default for ShortcutConfig {
@@ -178,24 +184,17 @@ impl Default for MagicConversionConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
 pub struct AppConfig {
     pub version: String,
     pub zenzai: ZenzaiConfig,
-    #[serde(default)]
     pub learning: LearningConfig,
-    #[serde(default)]
     pub shortcuts: ShortcutConfig,
-    #[serde(default)]
     pub dictionary: UserDictionaryConfig,
-    #[serde(default)]
     pub theme: ThemeConfig,
-    #[serde(default)]
     pub personalization: PersonalizationConfig,
-    #[serde(default)]
     pub live_conversion: LiveConversionConfig,
-    #[serde(default)]
     pub prediction: PredictionConfig,
-    #[serde(default)]
     pub magic_conversion: MagicConversionConfig,
 }
 
@@ -203,11 +202,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             version: "0.1.0".to_string(),
-            zenzai: ZenzaiConfig {
-                enable: false,
-                profile: String::new(),
-                backend: "vulkan".to_string(),
-            },
+            zenzai: ZenzaiConfig::default(),
             learning: LearningConfig::default(),
             shortcuts: ShortcutConfig::default(),
             dictionary: UserDictionaryConfig::default(),
@@ -216,6 +211,75 @@ impl Default for AppConfig {
             live_conversion: LiveConversionConfig::default(),
             prediction: PredictionConfig::default(),
             magic_conversion: MagicConversionConfig::default(),
+        }
+    }
+}
+
+/// Parses a settings file. A value of the wrong type (`"alpha": null`, a
+/// fractional timeout, a malformed dictionary entry) is replaced by its
+/// default on its own, so one bad value does not discard the rest of the
+/// user's settings. Only text that is not a JSON object is an error.
+fn parse_settings(source: &str) -> serde_json::Result<AppConfig> {
+    let file: serde_json::Value = serde_json::from_str(source)?;
+    if !file.is_object() {
+        return Err(serde::de::Error::custom("the settings are not a JSON object"));
+    }
+    if let Ok(config) = AppConfig::deserialize(&file) {
+        return Ok(config);
+    }
+
+    let mut merged = serde_json::to_value(AppConfig::default())?;
+    merge_valid_settings(&mut merged, "", &file);
+    AppConfig::deserialize(&merged)
+}
+
+/// Copies the values of `file` into the object at `pointer` in `merged`
+/// (which starts as the defaults), one field at a time, keeping a field's
+/// default when the file's value would make the settings invalid. Arrays are
+/// merged element by element.
+fn merge_valid_settings(merged: &mut serde_json::Value, pointer: &str, file: &serde_json::Value) {
+    use serde_json::Value;
+
+    fn is_valid(merged: &Value) -> bool {
+        AppConfig::deserialize(merged).is_ok()
+    }
+    fn slot<'a>(merged: &'a mut Value, pointer: &str) -> &'a mut Value {
+        merged.pointer_mut(pointer).expect("field of the defaults")
+    }
+
+    let (Some(Value::Object(defaults)), Value::Object(file)) = (merged.pointer(pointer), file)
+    else {
+        return;
+    };
+    let keys = defaults.keys().cloned().collect::<Vec<_>>();
+
+    for key in keys {
+        let Some(file_value) = file.get(&key) else {
+            continue;
+        };
+        let child = format!("{pointer}/{key}");
+        let default = slot(merged, &child);
+        if default.is_object() && file_value.is_object() {
+            merge_valid_settings(merged, &child, file_value);
+        } else if let (true, Value::Array(items)) = (default.is_array(), file_value) {
+            // Check each element on its own, so the check does not re-parse
+            // the elements accepted so far.
+            let mut accepted = Vec::with_capacity(items.len());
+            for (index, item) in items.iter().enumerate() {
+                *slot(merged, &child) = Value::Array(vec![item.clone()]);
+                if is_valid(merged) {
+                    accepted.push(item.clone());
+                } else {
+                    eprintln!("Ignoring the invalid setting {child}/{index}");
+                }
+            }
+            *slot(merged, &child) = Value::Array(accepted);
+        } else {
+            let default = std::mem::replace(default, file_value.clone());
+            if !is_valid(merged) {
+                eprintln!("Ignoring the invalid setting {child}; using the default");
+                *slot(merged, &child) = default;
+            }
         }
     }
 }
@@ -248,8 +312,10 @@ impl AppConfig {
     }
 
     /// Reads the settings, or the defaults when there is no settings file
-    /// yet. A file that cannot be read or parsed is an error, so a caller that
-    /// saves afterwards does not replace it with the defaults.
+    /// yet. A file that cannot be read or is not a JSON object is an error,
+    /// so a caller that saves afterwards does not replace it with the
+    /// defaults. Single invalid values are replaced by their defaults, see
+    /// [`parse_settings`].
     pub fn load() -> std::io::Result<Self> {
         let config_path = get_config_root().join(SETTINGS_FILENAME);
         let config_str = match std::fs::read_to_string(&config_path) {
@@ -259,7 +325,7 @@ impl AppConfig {
             }
             Err(error) => return Err(error),
         };
-        Ok(serde_json::from_str(&config_str)?)
+        Ok(parse_settings(&config_str)?)
     }
 
     /// The settings for code that only uses them: the defaults when they
@@ -605,6 +671,59 @@ mod tests {
         assert_eq!(config.prediction.max_candidates, 5);
         assert!(!config.magic_conversion.enabled);
         assert_eq!(config.magic_conversion.timeout_seconds, 10);
+    }
+
+    #[test]
+    fn invalid_settings_values_fall_back_one_by_one() {
+        let config = parse_settings(
+            r#"{
+                "zenzai":{"enable":true,"profile":"me","backend":7},
+                "personalization":{"enabled":true,"alpha":null},
+                "magic_conversion":{"api_key":"key","timeout_seconds":1.5,"model":"m"},
+                "dictionary":{"entries":[
+                    {"reading":"あ","word":"亜"},
+                    {"reading":"い"},
+                    {"reading":"う","word":"宇"}
+                ]},
+                "theme":5,
+                "shortcuts":{"ctrl_space_toggle":false}
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.version, "0.1.0");
+        assert!(config.zenzai.enable);
+        assert_eq!(config.zenzai.profile, "me");
+        assert_eq!(config.zenzai.backend, "vulkan");
+        assert!(config.personalization.enabled);
+        assert_eq!(config.personalization.alpha, 0.5);
+        assert_eq!(config.magic_conversion.api_key, "key");
+        assert_eq!(config.magic_conversion.model, "m");
+        assert_eq!(config.magic_conversion.timeout_seconds, 10);
+        assert_eq!(
+            config.dictionary.entries,
+            vec![
+                UserDictionaryEntry { reading: "あ".into(), word: "亜".into() },
+                UserDictionaryEntry { reading: "う".into(), word: "宇".into() },
+            ]
+        );
+        assert_eq!(config.theme.mode, "system");
+        assert!(!config.shortcuts.ctrl_space_toggle);
+        assert!(config.shortcuts.alt_backquote_toggle);
+    }
+
+    #[test]
+    fn settings_that_are_not_a_json_object_are_an_error() {
+        assert!(parse_settings("").is_err());
+        assert!(parse_settings("{\"version\":").is_err());
+        assert!(parse_settings("[]").is_err());
+    }
+
+    #[test]
+    fn empty_settings_object_gives_the_defaults() {
+        let config = parse_settings("{}").unwrap();
+        assert_eq!(config.version, "0.1.0");
+        assert_eq!(config.zenzai.backend, "vulkan");
     }
 
     #[test]

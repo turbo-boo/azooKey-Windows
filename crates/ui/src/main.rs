@@ -75,11 +75,18 @@ async fn run() -> anyhow::Result<()> {
     let incoming = TonicNamedPipeServer::new(shared::pipe::UI_PIPE)?;
     tokio::spawn(async move {
         println!("WindowServer listening");
-        Server::builder()
+        let result = Server::builder()
             .add_service(WindowServiceServer::new(grpc_service))
             .serve_with_incoming(incoming)
-            .await
-            .expect("gRPC server failed");
+            .await;
+        // The server also returns Ok when the pipe stream ends, e.g. because
+        // another ui.exe owns the pipe. Without its pipe this process can
+        // never be reached again; exit so that the launcher restarts it.
+        match result {
+            Ok(()) => eprintln!("The window service stopped accepting connections"),
+            Err(error) => eprintln!("The window service failed: {error}"),
+        }
+        std::process::exit(1);
     });
 
     let event_loop_proxy = event_loop.create_proxy();

@@ -18,7 +18,7 @@ use super::{
     user_action::{consume_translation, Function, Navigation},
 };
 use shared::AppConfig;
-use windows::core::{IUnknown, Interface as _};
+use windows::core::{IUnknown, Interface};
 use windows::Win32::{
     Foundation::{LPARAM, WPARAM},
     UI::{
@@ -175,7 +175,7 @@ impl ITfCompositionSink_Impl for TextServiceFactory_Impl {
             let text_service = self.borrow()?;
             let mut current = text_service.borrow_mut_composition()?;
             let ours = match (current.tip_composition.as_ref(), pcomposition) {
-                (Some(tip), Some(terminated)) => same_composition(tip, terminated),
+                (Some(tip), Some(terminated)) => same_object(tip, terminated),
                 // already let go of; reset only an engine left composing
                 (None, Some(_)) => current.lost_tip_composition(),
                 (_, None) => true,
@@ -184,26 +184,16 @@ impl ITfCompositionSink_Impl for TextServiceFactory_Impl {
                 // not the composition the engine is editing
                 return Ok(());
             }
-            current.tip_composition = None;
-            current.reset();
         }
 
-        // Only the stored connection: connecting here could stall the
-        // application, and without one there is nothing to clean up.
-        let ipc_service = IMEState::get().ok().and_then(|state| state.ipc_service.clone());
-        if let Some(mut ipc_service) = ipc_service {
-            release_ended_composition(&mut ipc_service);
-        }
-
-        Ok(())
+        self.forget_composition()
     }
 }
 
-/// Whether `a` and `b` are the same composition object. Interface pointers
-/// identify a COM object only through IUnknown; if that cannot be queried,
-/// they are taken to be the same, so a terminated composition is never left
-/// behind as the current one.
-fn same_composition(a: &ITfComposition, b: &ITfComposition) -> bool {
+/// Whether `a` and `b` are the same COM object. Interface pointers identify
+/// an object only through IUnknown; if that cannot be queried, they are
+/// taken to be the same, which keeps the engine on its current composition.
+fn same_object<T: Interface>(a: &T, b: &T) -> bool {
     match (a.cast::<IUnknown>(), b.cast::<IUnknown>()) {
         (Ok(a), Ok(b)) => a == b,
         _ => true,
@@ -421,12 +411,19 @@ impl TextServiceFactory {
         }
 
         #[allow(clippy::let_and_return)]
-        let (composition, mode) = {
+        let (mut composition, mode) = {
             let text_service = self.borrow()?;
             let composition = text_service.borrow_composition()?.clone();
             let mode = IMEState::get()?.input_mode.clone();
             (composition, mode)
         };
+        // handle_key ends a composition of another document before it
+        // handles the key, so classify the key as if none was active
+        if let Some(context) = context {
+            if self.composition_in_other_document(context)? {
+                composition.reset();
+            }
+        }
 
         let action = if ctrl_space || alt_backquote {
             UserAction::ToggleInputMode
@@ -750,6 +747,7 @@ impl TextServiceFactory {
         lparam: LPARAM,
     ) -> Result<bool> {
         if let Some(context) = context {
+            self.end_composition_in_other_document(context)?;
             self.borrow_mut()?.context = Some(context.clone());
         } else {
             return Ok(false);
@@ -763,6 +761,61 @@ impl TextServiceFactory {
         }
 
         Ok(true)
+    }
+
+    /// Whether the engine's TSF composition lives in another document than
+    /// `context`. After a focus change the end of the old composition may be
+    /// queued until its document can be locked, while keys already arrive in
+    /// the new document.
+    fn composition_in_other_document(&self, context: &ITfContext) -> Result<bool> {
+        let tip_composition = self.borrow()?.borrow_composition()?.tip_composition.clone();
+        let Some(tip_composition) = tip_composition else {
+            return Ok(false);
+        };
+        let owner = unsafe {
+            tip_composition
+                .GetRange()
+                .and_then(|range| range.GetContext())
+        };
+        Ok(match owner {
+            Ok(owner) => !same_object(&owner, context),
+            // the composition has ended
+            Err(_) => true,
+        })
+    }
+
+    /// Ends a composition of another document before a key in `context` is
+    /// handled, so the key cannot edit it: its text is committed there, or,
+    /// if that document cannot be edited now, the engine lets go of it.
+    fn end_composition_in_other_document(&self, context: &ITfContext) -> Result<()> {
+        if !self.composition_in_other_document(context)? {
+            return Ok(());
+        }
+        if let Err(error) = self.end_composition() {
+            tracing::warn!("Cannot end the composition in the other document: {error:?}");
+        }
+        self.forget_composition()
+    }
+
+    /// Forgets the TSF composition and resets the engine. The candidate
+    /// window and the converter are cleaned up through the existing
+    /// connection only: connecting here could stall the application, and
+    /// without a connection there is nothing to clean up.
+    fn forget_composition(&self) -> Result<()> {
+        {
+            let text_service = self.borrow()?;
+            let mut composition = text_service.borrow_mut_composition()?;
+            composition.tip_composition = None;
+            composition.reset();
+        }
+
+        let ipc_service = IMEState::get()
+            .ok()
+            .and_then(|state| state.ipc_service.clone());
+        if let Some(mut ipc_service) = ipc_service {
+            release_ended_composition(&mut ipc_service);
+        }
+        Ok(())
     }
 
     /// Applies AI conversion results queued by the background requests.

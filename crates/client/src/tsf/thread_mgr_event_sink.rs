@@ -1,4 +1,6 @@
-use windows::Win32::UI::TextServices::{ITfContext, ITfDocumentMgr, ITfThreadMgrEventSink_Impl};
+use windows::Win32::UI::TextServices::{
+    ITfContext, ITfDocumentMgr, ITfThreadFocusSink_Impl, ITfThreadMgrEventSink_Impl,
+};
 
 use anyhow::Result;
 
@@ -69,6 +71,26 @@ impl ITfThreadMgrEventSink_Impl for TextServiceFactory_Impl {
 
     #[macros::anyhow]
     fn OnPopContext(&self, _pic: Option<&ITfContext>) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl ITfThreadFocusSink_Impl for TextServiceFactory_Impl {
+    /// The input mode is process-wide but the open/close state is per
+    /// thread: after the mode was switched on another UI thread, this one
+    /// still shows the old one. OnSetFocus above is not enough, since the
+    /// thread can get the focus back without its focused document changing.
+    #[macros::anyhow]
+    fn OnSetThreadFocus(&self) -> Result<()> {
+        if let Ok(mode) = IMEState::get().map(|state| state.input_mode.clone()) {
+            self.update_open_close(&mode);
+        }
+        self.update_lang_bar()?;
+        Ok(())
+    }
+
+    #[macros::anyhow]
+    fn OnKillThreadFocus(&self) -> Result<()> {
         Ok(())
     }
 }

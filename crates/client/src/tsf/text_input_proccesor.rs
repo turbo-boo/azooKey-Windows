@@ -11,7 +11,7 @@ use windows::{
         UI::TextServices::{
             ITfCategoryMgr, ITfKeyEventSink, ITfKeystrokeMgr, ITfLangBarItemButton,
             ITfLangBarItemMgr, ITfSource, ITfTextInputProcessorEx_Impl, ITfTextInputProcessor_Impl,
-            ITfThreadMgr, ITfThreadMgrEventSink,
+            ITfThreadFocusSink, ITfThreadMgr, ITfThreadMgrEventSink,
         },
     },
 };
@@ -144,6 +144,16 @@ impl TextServiceFactory_Impl {
             text_service.thread_mgr_sink_cookie = Some(cookie);
         };
 
+        // republishes the input mode when the UI thread gets the focus back
+        tracing::debug!("AdviseThreadFocusSink");
+        unsafe {
+            let cookie = thread_mgr.cast::<ITfSource>()?.AdviseSink(
+                &ITfThreadFocusSink::IID,
+                &text_service.this::<ITfThreadFocusSink>()?,
+            )?;
+            text_service.thread_focus_sink_cookie = Some(cookie);
+        };
+
         // initialize text layout sink
         tracing::debug!("AdviseTextLayoutSink");
         let doc_mgr = unsafe { thread_mgr.GetFocus() };
@@ -214,6 +224,17 @@ impl TextServiceFactory_Impl {
                         thread_mgr
                             .cast::<ITfLangBarItemMgr>()?
                             .RemoveItem(&text_service.this::<ITfLangBarItemButton>()?)?;
+                        Ok(())
+                    })(),
+                );
+            }
+
+            if let Some(cookie) = text_service.thread_focus_sink_cookie.take() {
+                tracing::debug!("UnadviseThreadFocusSink");
+                check(
+                    "unadvise thread focus sink",
+                    (|| unsafe {
+                        thread_mgr.cast::<ITfSource>()?.UnadviseSink(cookie)?;
                         Ok(())
                     })(),
                 );

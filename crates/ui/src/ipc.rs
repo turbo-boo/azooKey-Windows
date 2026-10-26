@@ -70,7 +70,10 @@ impl WindowServiceProto for WindowService {
         &self,
         request: Request<SetPositionRequest>,
     ) -> Result<Response<EmptyResponse>, Status> {
-        let position = request.into_inner().position.unwrap();
+        let position = request
+            .into_inner()
+            .position
+            .ok_or_else(|| Status::invalid_argument("position is required"))?;
         let top = position.top;
         let left = position.left;
         let bottom = position.bottom;

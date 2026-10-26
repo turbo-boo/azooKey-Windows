@@ -223,15 +223,23 @@ impl Default for AppConfig {
 impl AppConfig {
     /// Saves the settings. Readers (IME, UI, server, settings app) may open
     /// the file at any time, so a temporary file replaces the settings in one
-    /// step and nobody reads a half-written file.
+    /// step and nobody reads a half-written file. The temporary file is
+    /// flushed to disk before the rename: otherwise a power loss can leave the
+    /// renamed settings file empty.
     pub fn write(&self) -> std::io::Result<()> {
+        use std::io::Write as _;
+
         let config_root = get_config_root();
         std::fs::create_dir_all(&config_root)?;
         let config_path = config_root.join(SETTINGS_FILENAME);
         let config_str = serde_json::to_string_pretty(self)?;
         let temp_path =
             config_root.join(format!("{SETTINGS_FILENAME}.{}.tmp", std::process::id()));
-        let result = std::fs::write(&temp_path, config_str)
+        let result = std::fs::File::create(&temp_path)
+            .and_then(|mut file| {
+                file.write_all(config_str.as_bytes())?;
+                file.sync_all()
+            })
             .and_then(|()| replace_file(&temp_path, &config_path));
         if result.is_err() {
             let _ = std::fs::remove_file(&temp_path);

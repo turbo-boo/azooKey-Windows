@@ -71,6 +71,11 @@ jobs:
         $principal = $task.SelectSingleNode("//task:Principals/task:Principal", $ns)
         if ($principal.GroupId -ne "S-1-5-32-545") { throw "Startup task must run for every user (BUILTIN\Users)" }
         if ($principal.RunLevel -ne "HighestAvailable") { throw "Startup task must use the highest available run level" }
+        # The launcher supervises the server and UI for the whole session;
+        # stopping the task on battery would kill it on unplug.
+        $settings = $task.SelectSingleNode("//task:Settings", $ns)
+        if ($settings.StopIfGoingOnBatteries -ne "false") { throw "Startup task must not stop on battery power" }
+        if ($settings.DisallowStartIfOnBatteries -ne "false") { throw "Startup task must start on battery power" }
 
         $installer = Get-Content "installer/Installer.iss" -Raw
         if ($installer -match "CreateVbsFile|PATH_TO_VBS|wscript\.exe") {

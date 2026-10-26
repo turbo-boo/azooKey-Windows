@@ -28,10 +28,11 @@ use windows::{
             },
             SystemServices::PRIVILEGE_SET_ALL_NECESSARY,
             Threading::{
-                CreateProcessAsUserW, GetCurrentProcess, GetExitCodeProcess, GetStartupInfoW,
-                OpenProcess, OpenProcessToken, ResumeThread, SetThreadToken, TerminateProcess,
-                WaitForSingleObject, CREATE_SUSPENDED, INFINITE, PROCESS_INFORMATION,
-                PROCESS_QUERY_LIMITED_INFORMATION, STARTUPINFOW,
+                CreateProcessAsUserW, GetCurrentProcess, GetExitCodeProcess, GetPriorityClass,
+                GetStartupInfoW, OpenProcess, OpenProcessToken, ResumeThread, SetThreadToken,
+                TerminateProcess, WaitForSingleObject, CREATE_SUSPENDED, INFINITE,
+                PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+                STARTUPINFOW,
             },
         },
     },
@@ -292,6 +293,9 @@ pub fn run_with_uiaccess() -> Result<Option<u32>> {
 
     unsafe {
         GetStartupInfoW(&mut startup_info);
+        // The launcher raised this process's priority and exempted it from
+        // EcoQoS for the real UI; neither carries over to a child by itself.
+        let priority_class = PROCESS_CREATION_FLAGS(GetPriorityClass(GetCurrentProcess()));
         let created = CreateProcessAsUserW(
             token_handle,
             None,
@@ -299,7 +303,7 @@ pub fn run_with_uiaccess() -> Result<Option<u32>> {
             None,
             None,
             false,
-            CREATE_SUSPENDED,
+            CREATE_SUSPENDED | priority_class,
             None,
             None,
             &startup_info,
@@ -309,6 +313,9 @@ pub fn run_with_uiaccess() -> Result<Option<u32>> {
         std::env::remove_var(RELAUNCHED_VARIABLE);
         created?;
 
+        if let Err(error) = shared::opt_out_of_power_throttling(process_info.hProcess) {
+            eprintln!("Failed to disable power throttling: {error}");
+        }
         if let Some(job) = job {
             if let Err(error) = AssignProcessToJobObject(job, process_info.hProcess) {
                 eprintln!("The UIAccess process may outlive this one: {error}");

@@ -8,11 +8,7 @@ use std::process::{Child, Command, Stdio};
 use std::{env, thread};
 use windows::Win32::{
     Foundation::HANDLE,
-    System::Threading::{
-        ProcessPowerThrottling, SetProcessInformation, ABOVE_NORMAL_PRIORITY_CLASS,
-        CREATE_NO_WINDOW, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-        PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
-    },
+    System::Threading::{ABOVE_NORMAL_PRIORITY_CLASS, CREATE_NO_WINDOW},
 };
 
 fn file_on_search_path(filename: &str) -> bool {
@@ -64,25 +60,8 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-// The converter and candidate window are windowless background processes, so
-// Windows neither boosts them like the foreground app nor exempts them from
-// EcoQoS. Every keystroke waits on them synchronously; under CPU contention
-// that turns into visible input lag.
 fn opt_out_of_power_throttling(child: &Child) {
-    let state = PROCESS_POWER_THROTTLING_STATE {
-        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
-        StateMask: 0,
-    };
-    let result = unsafe {
-        SetProcessInformation(
-            HANDLE(child.as_raw_handle()),
-            ProcessPowerThrottling,
-            std::ptr::from_ref(&state).cast(),
-            size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
-        )
-    };
-    if let Err(error) = result {
+    if let Err(error) = shared::opt_out_of_power_throttling(HANDLE(child.as_raw_handle())) {
         eprintln!("Failed to disable power throttling: {error}");
     }
 }

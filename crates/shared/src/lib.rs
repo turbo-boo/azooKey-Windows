@@ -12,6 +12,35 @@ pub mod proto {
         tonic::include_file_descriptor_set!("azookey_service_descriptor");
 }
 
+/// Exempts `process` from EcoQoS execution-speed throttling. The converter
+/// and candidate window are windowless background processes, so Windows
+/// neither boosts them like the foreground app nor exempts them from EcoQoS.
+/// Every keystroke waits on them synchronously; under CPU contention that
+/// turns into visible input lag.
+#[cfg(windows)]
+pub fn opt_out_of_power_throttling(
+    process: windows::Win32::Foundation::HANDLE,
+) -> windows::core::Result<()> {
+    use windows::Win32::System::Threading::{
+        ProcessPowerThrottling, SetProcessInformation, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+    };
+
+    let state = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: 0,
+    };
+    unsafe {
+        SetProcessInformation(
+            process,
+            ProcessPowerThrottling,
+            std::ptr::from_ref(&state).cast(),
+            size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        )
+    }
+}
+
 fn get_config_root() -> PathBuf {
     let appdata = std::env::var("APPDATA")
         .map(PathBuf::from)

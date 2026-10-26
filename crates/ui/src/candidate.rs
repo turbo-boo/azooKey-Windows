@@ -332,6 +332,9 @@ pub fn create_candidate_webview(web_context: &mut WebContext) -> Result<WebViewB
                         if (customStyle) {
                             customStyle.textContent = theme.custom_css_enabled ? (theme.custom_css || '') : '';
                         }
+
+                        // Custom CSS can change the height of the rows.
+                        if (document.readyState !== 'loading') adjustWindowSize();
                     }
 
                     function updateCandidates(candidates) {
@@ -384,28 +387,43 @@ pub fn create_candidate_webview(web_context: &mut WebContext) -> Result<WebViewB
                             elementRect.bottom <= containerRect.bottom;
                     }
 
+                    let reportedHeight = null;
+
+                    // Measures the window height for five candidates with
+                    // the current theme (custom CSS may change fonts and
+                    // spacing) and reports it when it changed. Probe items
+                    // are added and removed in the same task, so the shown
+                    // candidates are kept and nothing is painted.
                     function adjustWindowSize() {
+                        if (!document.body) return;
                         const candidateList = document.getElementById('candidate-list');
-                        candidateList.innerHTML = '';
+                        const probes = [];
                         for (let i = 0; i < 5; i++) {
                             const li = document.createElement('li');
                             li.textContent = `Item ${i + 1}`;
                             candidateList.appendChild(li);
+                            probes.push(li);
                         }
 
                         const footer = document.querySelector('footer');
                         const main = document.querySelector('main');
                         const body = document.body;
-                        const itemHeight = candidateList.children[0].offsetHeight;
+                        const itemHeight = probes[0].getBoundingClientRect().height;
                         const candidateListHeight = itemHeight * 5;
-                        const footerHeight = footer.offsetHeight;
+                        const footerHeight = footer.getBoundingClientRect().height;
                         const mainStyle = window.getComputedStyle(main);
                         const bodyStyle = window.getComputedStyle(body);
-                        const mainPadding = parseInt(mainStyle.paddingTop) + parseInt(mainStyle.paddingBottom);
-                        const bodyPadding = parseInt(bodyStyle.paddingTop) + parseInt(bodyStyle.paddingBottom);
-                        const totalHeight = candidateListHeight + footerHeight + mainPadding + bodyPadding;
+                        const verticalSpace = (style) =>
+                            parseFloat(style.paddingTop) + parseFloat(style.paddingBottom) +
+                            parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth);
+                        const totalHeight = Math.ceil(
+                            candidateListHeight + footerHeight +
+                            verticalSpace(mainStyle) + verticalSpace(bodyStyle)
+                        );
 
-                        candidateList.innerHTML = '';
+                        probes.forEach((li) => li.remove());
+                        if (totalHeight === reportedHeight) return;
+                        reportedHeight = totalHeight;
                         window.ipc.postMessage(JSON.stringify({
                             type: 'resize',
                             height: totalHeight
@@ -417,6 +435,8 @@ pub fn create_candidate_webview(web_context: &mut WebContext) -> Result<WebViewB
                         // A theme sent before the page existed was lost.
                         window.ipc.postMessage(JSON.stringify({ type: 'ready' }));
                         setTimeout(adjustWindowSize, 50);
+                        // Fonts named by custom CSS can finish loading later.
+                        document.fonts.addEventListener('loadingdone', adjustWindowSize);
                     });
 
                     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {

@@ -16,19 +16,28 @@ use windows::{
             GetLastError, ERROR_CLASS_ALREADY_EXISTS, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM,
         },
         UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, PostMessageW,
-            RegisterClassW, SetWindowLongPtrW, UnregisterClassW, GWLP_USERDATA, HWND_MESSAGE,
-            WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WNDCLASSW,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, KillTimer,
+            PostMessageW, RegisterClassW, SetTimer, SetWindowLongPtrW, UnregisterClassW,
+            GWLP_USERDATA, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_TIMER,
+            WNDCLASSW,
         },
     },
 };
 
-use crate::{engine::composition::MagicResult, globals::DllModule};
+use crate::{
+    engine::composition::{Delivery, MagicResult},
+    globals::DllModule,
+};
 
 use super::factory::TextServiceFactory;
 
 const CLASS_NAME: PCWSTR = w!("AzookeyTextServiceMessages");
 const WM_MAGIC_RESULT: u32 = WM_APP + 1;
+/// Retries a delivery that found the text service in use. A timer, not a
+/// posted message: a nested message loop running while the text service is
+/// in use would dispatch a posted message again at once, over and over.
+const RETRY_TIMER: usize = 1;
+const RETRY_DELAY_MS: u32 = 50;
 
 type Queue = Arc<Mutex<VecDeque<MagicResult>>>;
 
@@ -144,10 +153,21 @@ unsafe extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if msg == WM_MAGIC_RESULT {
+    let retry = msg == WM_TIMER && wparam.0 == RETRY_TIMER;
+    if msg == WM_MAGIC_RESULT || retry {
+        if retry {
+            let _ = KillTimer(hwnd, RETRY_TIMER);
+        }
         let owner = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const TextServiceFactory;
         if let Some(owner) = owner.as_ref() {
-            owner.deliver_magic_results();
+            if owner.deliver_magic_results() == Delivery::Busy
+                && SetTimer(hwnd, RETRY_TIMER, RETRY_DELAY_MS, None) == 0
+            {
+                tracing::warn!(
+                    "Cannot schedule the AI result delivery: {:?}",
+                    windows::core::Error::from_win32()
+                );
+            }
         }
         return LRESULT(0);
     }

@@ -96,6 +96,15 @@ pub struct MagicRequest {
     source: String,
 }
 
+/// Whether [`TextServiceFactory::deliver_magic_results`] could take the
+/// queued results.
+#[derive(Debug, PartialEq)]
+pub enum Delivery {
+    Done,
+    /// The text service is in use; the results are still queued.
+    Busy,
+}
+
 #[derive(Debug)]
 pub struct MagicResult {
     request: MagicRequest,
@@ -818,21 +827,24 @@ impl TextServiceFactory {
         Ok(())
     }
 
-    /// Applies AI conversion results queued by the background requests.
+/// Applies AI conversion results queued by the background requests.
     /// Runs on the TSF thread, from the text service's message window.
-    pub fn deliver_magic_results(&self) {
-        let results = match self.borrow() {
+    ///
+    /// Applying a result edits the composition, which needs the text
+    /// service to itself. If it is in use (the message was dispatched from a
+    /// message loop nested in our own work), the results stay queued and
+    /// the window tries again shortly: no other message would come for them.
+    pub fn deliver_magic_results(&self) -> Delivery {
+        let results = match self.borrow_mut() {
             Ok(text_service) => match text_service.message_window.as_ref() {
                 Some(window) => window.take_results(),
-                None => return,
+                None => return Delivery::Done,
             },
             Err(error) => {
-                // left queued; the next delivery picks them up
-                tracing::warn!("Cannot deliver AI conversion results now: {error:?}");
-                return;
+                tracing::debug!("Text service in use, delivering AI results later: {error:?}");
+                return Delivery::Busy;
             }
         };
-
         for result in results {
             // The staleness check runs when the edit session does, so a result
             // queued behind the document lock is still checked against the
@@ -847,6 +859,7 @@ impl TextServiceFactory {
                 tracing::warn!("Failed to show AI conversion candidates: {error:?}");
             }
         }
+        Delivery::Done
     }
 
     fn apply_magic_result(&self, result: MagicResult) -> Result<()> {

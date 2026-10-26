@@ -17,6 +17,14 @@ message ComposingText {
   // Input units in the whole composition; corresponding_count and ShrinkText
   // offsets count in these units.
   int32 input_count = 4;
+  // Identifies the converter's composition. It changes whenever the converter
+  // starts over (ClearText, a server restart), so a client can tell that the
+  // text it is editing is no longer the converter's.
+  uint64 composition_id = 5;
+  // The input units of the whole composition, one character each, as the
+  // converter holds them after this edit (e.g. romaji keys, or kana the
+  // converter rewrote them into).
+  string input_text = 6;
 }
 
 // Request message for AppendText.

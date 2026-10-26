@@ -471,6 +471,14 @@ public func free_candidates(
     return Int32(composingText.input.count)
 }
 
+/// The input units themselves, one character each (GetInputCount of them).
+/// After a deletion the converter may have rewritten romaji into kana
+/// ("sha" -> "し"), so this is the only reliable record of the input.
+@_silgen_name("GetInputText")
+@MainActor public func get_input_text() -> UnsafeMutablePointer<CChar> {
+    return _strdup(String(composingText.input.map(\.character)))!
+}
+
 @_silgen_name("SetContext")
 @MainActor public func set_context(
     context: UnsafePointer<CChar>

@@ -15,12 +15,21 @@ use shared::proto::{
 };
 use shared::{parse_magic_candidates, validate_magic_endpoint_parts, AppConfig};
 
+use std::collections::hash_map::RandomState;
 use std::ffi::{c_char, c_int, CStr, CString};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::hash::BuildHasher;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 const USE_ZENZAI: bool = true;
 static LIVE_CONVERSION_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// The converter's current composition (see ComposingText.composition_id).
+/// Starts from a random value so a restarted server never repeats the
+/// previous instance's identifiers.
+static COMPOSITION_ID: LazyLock<AtomicU64> =
+    LazyLock::new(|| AtomicU64::new(RandomState::new().hash_one(std::process::id())));
 
 struct RawComposingText {
     text: String,
@@ -46,6 +55,7 @@ unsafe extern "C" {
     fn ShrinkText(offset: c_int) -> *mut c_char;
     fn ClearText();
     fn GetInputCount() -> c_int;
+    fn GetInputText() -> *mut c_char;
     fn GetComposedText(lengthPtr: *mut c_int, requestRichCandidates: bool) -> *mut *mut FFICandidate;
     fn CommitCandidate(candidateIndex: c_int);
     fn FlushLearning();
@@ -142,6 +152,8 @@ fn clear_text() {
     unsafe {
         ClearText();
     }
+    // the converter starts a new composition
+    COMPOSITION_ID.fetch_add(1, Ordering::Relaxed);
 }
 
 fn get_composed_text(rich_candidates: bool) -> Vec<Suggestion> {
@@ -197,6 +209,8 @@ fn composing_text_response(raw: RawComposingText, edit: CompositionEdit) -> Comp
         suggestions,
         is_converted,
         input_count,
+        composition_id: COMPOSITION_ID.load(Ordering::Relaxed),
+        input_text: unsafe { take_string(GetInputText()) },
     }
 }
 

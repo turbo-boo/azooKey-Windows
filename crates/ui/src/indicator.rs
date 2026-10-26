@@ -8,7 +8,8 @@ use tao::{
 use windows::Win32::{
     Foundation::HWND,
     UI::WindowsAndMessaging::{
-        SetWindowLongW, GWL_EXSTYLE, GWL_STYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+        SetWindowLongW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+        SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
         WS_POPUP,
     },
 };
@@ -21,7 +22,8 @@ pub fn create_indicator_window(event_loop: &EventLoop<UserEvent>) -> Result<Wind
         .with_decorations(false)
         .with_title("Indicator")
         .with_focused(false)
-        // .with_visible(false)
+        // Shown only for a moment after the input mode changes.
+        .with_visible(false)
         .with_undecorated_shadow(false)
         .with_transparent(true)
         .build(&event_loop)
@@ -40,6 +42,17 @@ pub fn create_indicator_window(event_loop: &EventLoop<UserEvent>) -> Result<Wind
 
         let style = WS_POPUP.0;
         SetWindowLongW(HWND(hwnd), GWL_STYLE, style as i32);
+
+        // Style changes take effect only after SWP_FRAMECHANGED.
+        let _ = SetWindowPos(
+            HWND(hwnd),
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
     };
 
     Ok(window)

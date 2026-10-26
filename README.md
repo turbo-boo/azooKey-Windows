@@ -146,6 +146,7 @@ regsvr32.exe "path/to/build/x86/azookey_windows.dll" /s
 #### 開発時のヒント
 - 開発は仮想マシンまたは専用のPCで行うことを推奨します。IMEがクラッシュするとWindowsがフリーズする可能性があります。
 - IMEを解除する際、IMEを使用中のアプリケーション（メモ帳など）を終了しないと、解除できないことがあります。
+- デバッグビルドのIMEは`%LOCALAPPDATA%\Azookey\logs`にトレースログを出力します。Chromeのトレースビューアーで開けます。
 
 # 関連
 

@@ -47,6 +47,8 @@ pub enum UserEvent {
     Relayout,
     /// The candidate page finished loading.
     CandidatePageReady,
+    /// The mode indicator page finished loading.
+    IndicatorPageReady,
     WindowAction(WindowAction),
 }
 
@@ -173,8 +175,12 @@ async fn run() -> anyhow::Result<()> {
     let mut candidate_theme = candidate::ThemeState::default();
 
     let indicator_window = indicator::create_indicator_window(&event_loop)?;
-    let indicator_webview =
-        indicator::create_indicator_webview(&indicator_window, &mut web_context)?;
+    let indicator_webview = indicator::create_indicator_webview(
+        &indicator_window,
+        &mut web_context,
+        event_loop_proxy.clone(),
+    )?;
+    let mut indicator_theme = indicator::IndicatorTheme::default();
 
     // handle window actions
     let proxy_clone = event_loop_proxy.clone();
@@ -296,6 +302,10 @@ async fn run() -> anyhow::Result<()> {
                     candidate_theme.forget_applied();
                     candidate_theme.apply(&candidate_webview, &AppConfig::read_cached().theme);
                 }
+                UserEvent::IndicatorPageReady => {
+                    indicator_theme.forget_applied();
+                    indicator_theme.apply(&indicator_webview, &AppConfig::read_cached().theme.mode);
+                }
                 UserEvent::WindowAction(action) => {
                     match action {
                         WindowAction::Show => {
@@ -368,6 +378,8 @@ async fn run() -> anyhow::Result<()> {
                             indicator_webview
                                 .evaluate_script(&indicator::input_mode_script(&input_method))
                                 .unwrap();
+                            indicator_theme
+                                .apply(&indicator_webview, &AppConfig::read_cached().theme.mode);
                             indicator_layout.apply(caret, &indicator_window);
                             let _ = unsafe {
                                 ShowWindow(

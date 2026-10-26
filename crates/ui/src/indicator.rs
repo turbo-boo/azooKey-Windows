@@ -1,6 +1,6 @@
 use anyhow::{Context as _, Result};
 use tao::{
-    event_loop::EventLoop,
+    event_loop::{EventLoop, EventLoopProxy},
     platform::windows::{WindowBuilderExtWindows, WindowExtWindows},
     window::{Window, WindowBuilder},
 };
@@ -55,9 +55,18 @@ pub fn create_indicator_window(event_loop: &EventLoop<UserEvent>) -> Result<Wind
     Ok(window)
 }
 
-pub fn create_indicator_webview(window: &Window, web_context: &mut WebContext) -> Result<WebView> {
+pub fn create_indicator_webview(
+    window: &Window,
+    web_context: &mut WebContext,
+    proxy: EventLoopProxy<UserEvent>,
+) -> Result<WebView> {
     let webview = WebViewBuilder::with_web_context(web_context)
         .with_transparent(true)
+        .with_ipc_handler(move |message| {
+            if message.body() == "ready" {
+                let _ = proxy.send_event(UserEvent::IndicatorPageReady);
+            }
+        })
         .with_html(
             r##"
         <html>
@@ -83,20 +92,40 @@ pub fn create_indicator_webview(window: &Window, web_context: &mut WebContext) -
                         align-items: center;
                     }
 
-                    @media (prefers-color-scheme: dark) {
-                        body {
-                            color: #FFFFFF;
-                        }
-                        main {
-                            border: 1px solid #5C6BC0;
-                            background-color: #1E1E1E;
-                        }
+                    html.dark body {
+                        color: #FFFFFF;
+                    }
+                    html.dark main {
+                        border: 1px solid #5C6BC0;
+                        background-color: #1E1E1E;
                     }
                 </style>
                 <script>
+                    let themeMode = 'system';
+                    const systemDark = window.matchMedia('(prefers-color-scheme: dark)');
+
+                    function updateColorScheme() {
+                        const dark = themeMode === 'dark' ||
+                            (themeMode === 'system' && systemDark.matches);
+                        document.documentElement.classList.toggle('dark', dark);
+                    }
+
+                    // mode: the theme.mode setting, "system", "light" or "dark".
+                    function applyTheme(mode) {
+                        themeMode = mode;
+                        updateColorScheme();
+                    }
+
                     function updateInputMethod(text) {
                         document.querySelector('main').innerText = text;
                     }
+
+                    systemDark.addEventListener('change', updateColorScheme);
+                    updateColorScheme();
+                    window.addEventListener('DOMContentLoaded', () => {
+                        // A theme sent before the page existed was lost.
+                        window.ipc.postMessage('ready');
+                    });
                 </script>
             </head>
             <body style="margin: 0;">
@@ -118,9 +147,47 @@ pub fn input_mode_script(mode: &str) -> String {
     format!("updateInputMethod({})", serde_json::Value::from(mode))
 }
 
+/// Script that applies the `theme.mode` setting to the indicator.
+fn theme_script(theme_mode: &str) -> String {
+    format!("applyTheme({})", serde_json::Value::from(theme_mode))
+}
+
+/// Tracks the `theme.mode` the indicator page shows, so it is only sent
+/// when it changed.
+#[derive(Default)]
+pub struct IndicatorTheme {
+    applied: Option<String>,
+}
+
+impl IndicatorTheme {
+    /// The page was (re)loaded and lost the mode sent before.
+    pub fn forget_applied(&mut self) {
+        self.applied = None;
+    }
+
+    pub fn apply(&mut self, webview: &WebView, theme_mode: &str) {
+        if self.applied.as_deref() == Some(theme_mode) {
+            return;
+        }
+        match webview.evaluate_script(&theme_script(theme_mode)) {
+            Ok(()) => self.applied = Some(theme_mode.to_string()),
+            Err(error) => {
+                eprintln!("Failed to apply indicator theme: {error}");
+                self.applied = None;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::input_mode_script;
+    use super::{input_mode_script, theme_script};
+
+    #[test]
+    fn theme_mode_is_passed_as_a_string_literal() {
+        assert_eq!(theme_script("dark"), r#"applyTheme("dark")"#);
+        assert_eq!(theme_script(r#"x");("#), r#"applyTheme("x\");(")"#);
+    }
 
     #[test]
     fn input_mode_is_passed_as_a_single_string_literal() {

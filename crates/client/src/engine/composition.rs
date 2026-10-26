@@ -182,7 +182,7 @@ impl ITfCompositionSink_Impl for TextServiceFactory_Impl {
         // reset the engine, which needs neither the document nor the server.
         {
             let text_service = self.borrow()?;
-            let mut current = text_service.borrow_mut_composition()?;
+            let current = text_service.borrow_composition()?;
             let ours = match (current.tip_composition.as_ref(), pcomposition) {
                 (Some(tip), Some(terminated)) => same_object(tip, terminated),
                 // already let go of; reset only an engine left composing

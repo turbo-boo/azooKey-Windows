@@ -767,9 +767,14 @@ begin
 end;
 
 procedure Dependency_AddWebView2;
+var
+  Version: String;
 begin
   // https://developer.microsoft.com/en-us/microsoft-edge/webview2
-  if not RegValueExists(HKLM, Dependency_String('SOFTWARE', 'SOFTWARE\WOW6432Node') + '\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv') then begin
+  // https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution#detect-if-a-webview2-runtime-is-already-installed
+  // An empty or 0.0.0.0 pv means the runtime is not installed.
+  if not RegQueryStringValue(HKLM, Dependency_String('SOFTWARE', 'SOFTWARE\WOW6432Node') + '\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', Version)
+    or (Version = '') or (Version = '0.0.0.0') then begin
     Dependency_Add('MicrosoftEdgeWebview2Setup.exe',
       '/silent /install',
       'WebView2 Runtime',

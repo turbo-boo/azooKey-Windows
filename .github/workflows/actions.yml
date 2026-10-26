@@ -94,6 +94,16 @@ jobs:
           throw "The settings app must be installed per machine"
         }
 
+        # WebView2 is installed by the outer installer from a verified copy in
+        # Program Files, not by the settings app's NSIS installer, which
+        # would run a bootstrapper from a fixed path in the user's TEMP.
+        if ($tauri.bundle.windows.webviewInstallMode.type -ne "skip") {
+          throw "The settings app installer must not install WebView2"
+        }
+        if ($installer -notmatch "Dependency_AddWebView2;") {
+          throw "The installer does not install WebView2"
+        }
+
         $nsis = Get-Content "frontend/src-tauri/installer.nsi" -Raw
         if ($nsis -notmatch 'schtasks\.exe" /Delete /TN "Azookey Startup" /F') {
           throw "Tauri uninstaller does not clean the startup task"

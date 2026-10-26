@@ -8,6 +8,11 @@
 ; privileges, so its binaries must not be writable by the user. The directory
 ; is fixed (no directory page; another /DIR= is refused in PrepareToInstall).
 #define MyAppDir "{autopf}\" + MyAppName
+#define SettingsAppSetup "Azookey_0.1.0_x64-setup.exe"
+#define SettingsAppSetupSource "../target/release/bundle/nsis/" + SettingsAppSetup
+; Checked before the settings app's installer is run (Azookey_ExecuteDependency).
+#define SettingsAppSetupSha256 GetSHA256OfFile(AddBackslash(SourcePath) + SettingsAppSetupSource)
+#define Dependency_CustomExecute "Azookey_ExecuteDependency"
 
 [Setup]
 ; NOTE: The value of AppId uniquely identifies this application. Do not use the same AppId value in installers for other applications.
@@ -56,7 +61,7 @@ Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 Source: "../build/azookey_windows.dll"; DestDir: "{app}"; DestName: "azookey.dll"; Flags: ignoreversion regserver restartreplace uninsrestartdelete 64bit
 Source: "../build/x86/azookey_windows.dll"; DestDir: "{app}"; DestName: "azookey32.dll"; Flags: ignoreversion regserver restartreplace uninsrestartdelete 32bit
 Source: "../build/*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "../target/release/bundle/nsis/Azookey_0.1.0_x64-setup.exe"; Flags: dontcopy noencryption
+Source: "{#SettingsAppSetupSource}"; Flags: dontcopy noencryption
 Source: "./Azookey Startup.xml"; Flags: dontcopy noencryption
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
 
@@ -124,6 +129,68 @@ begin
   end;
 end;
 
+// Whether a dependency installer is the expected file: the settings app's
+// installer must be the one built into this setup; anything downloaded (VC++
+// runtimes, WebView2) must carry a valid Authenticode signature by Microsoft.
+function Azookey_IsTrustedDependency(const Path: String): Boolean;
+var
+  QuotedPath: String;
+  Script: String;
+  ResultCode: Integer;
+begin
+  if CompareText(ExtractFileName(Path), '{#SettingsAppSetup}') = 0 then
+  begin
+    Result := CompareText(GetSHA256OfFile(Path), '{#SettingsAppSetupSha256}') = 0;
+    Exit;
+  end;
+
+  QuotedPath := Path;
+  StringChangeEx(QuotedPath, '''', '''''', True);
+  Script := '$s = Get-AuthenticodeSignature -LiteralPath ''' + QuotedPath + '''; ' +
+    'if ($s.Status -eq ''Valid'' -and $s.SignerCertificate.Subject -like ''CN=Microsoft Corporation,*'') { exit 0 }; ' +
+    'exit 1';
+  Result := Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' + Script + '"', '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+end;
+
+// Runs a dependency installer (CodeDependencies.iss) with Setup's
+// administrator rights. Setup downloads or extracts it into {tmp}, which lies
+// in the user's TEMP directory and is writable without elevation, so the file
+// could be replaced before it is started. Copy it into {app} (Program Files,
+// writable only by administrators; checked by Azookey_CheckAppDir), check the
+// copy there and run that.
+function Azookey_ExecuteDependency(const Filename, Parameters: String; var ResultCode: Integer): Boolean;
+var
+  AppDir: String;
+  Staged: String;
+begin
+  Result := False;
+  ResultCode := -1;
+  AppDir := RemoveBackslashUnlessRoot(ExpandConstant('{app}'));
+  Staged := AppDir + '\' + ExtractFileName(Filename);
+  if not ForceDirectories(AppDir) then
+  begin
+    Log(Format('Failed to create %s', [AppDir]));
+    Exit;
+  end;
+  // A copy left behind by an interrupted setup.
+  DeleteFile(Staged);
+  if not CopyFile(Filename, Staged, True) then
+  begin
+    Log(Format('Failed to copy %s to %s', [Filename, Staged]));
+    Exit;
+  end;
+  try
+    if Azookey_IsTrustedDependency(Staged) then
+      Result := Exec(Staged, Parameters, '', SW_SHOWNORMAL, ewWaitUntilTerminated, ResultCode)
+    else
+      Log(Format('%s is not the expected file; not running it', [Filename]));
+  finally
+    DeleteFile(Staged);
+  end;
+end;
+
 #include "CodeDependencies.iss"
 
 [Code]
@@ -133,15 +200,20 @@ const
 
 function InitializeSetup: Boolean;
 begin
-  ExtractTemporaryFile('Azookey_0.1.0_x64-setup.exe');
+  ExtractTemporaryFile('{#SettingsAppSetup}');
   Dependency_AddVC2015To2022x64;
   Dependency_AddVC2015To2022x86;
+  // ui.exe and the settings app both need the WebView2 runtime. The settings
+  // app's installer does not install it (webviewInstallMode skip): it would
+  // download the bootstrapper to a fixed path in the user's TEMP directory and
+  // run it with our rights.
+  Dependency_AddWebView2;
   // NSIS installers take /S for a silent install; the previous /q was not
   // recognised, so the settings app's installer wizard opened and Setup
   // waited for it. The settings app is installed per machine next to the IME
   // (/D= must be the last parameter, unquoted); UninstallSettingsApp relies on
   // that location.
-  Dependency_Add('Azookey_0.1.0_x64-setup.exe',
+  Dependency_Add('{#SettingsAppSetup}',
     '/S /D=' + ExpandConstant('{#MyAppDir}'),
     'Azookey',
     '', '', True, False);

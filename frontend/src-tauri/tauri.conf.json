@@ -32,6 +32,9 @@
       "icons/icon.ico"
     ],
     "windows": {
+      "webviewInstallMode": {
+        "type": "skip"
+      },
       "nsis": {
         "template": "installer.nsi",
         "installMode": "perMachine",
